@@ -74,7 +74,7 @@ def get_summary(symbol: str) -> dict:
                         'touch_price': t['price'],
                         'trough_date': data.loc[pivot_idx, 'date'],
                         'trough_price': pivot_price,
-                        'drop_dollars': drop_dollars,
+                        'drop_dollars': -drop_dollars,
                         'trading_days': days_diff
                     })
 
@@ -109,7 +109,7 @@ def get_summary(symbol: str) -> dict:
                     'intra_hug_change': hug['end_price'] - hug['start_price'],
                     'trough_date': data.loc[pivot_idx, 'date'],
                     'trough_price': pivot_price,
-                    'drop_dollars': drop_dollars,
+                    'drop_dollars': -drop_dollars,
                     'trading_days': days_diff
                 })
 
@@ -224,11 +224,8 @@ def get_summary(symbol: str) -> dict:
     
     try:
         fundamentals = fetch_stock_fundamentals(symbol)
-        pe_ratio = fundamentals.get("PE_ratio")
-        peg = fundamentals.get("PEG")
     except Exception as e:
-        pe_ratio = None
-        peg = None
+        fundamentals = {}
 
     # -------------------------------
     # 7. COMPILE THE SUMMARY
@@ -241,8 +238,6 @@ def get_summary(symbol: str) -> dict:
         'final_price': final_price,
         'price_change_in_dollars': final_price - initial_price,
         'percentage_change': percentage_change,
-        'PE_ratio': pe_ratio,
-        'PEG': peg,
         'total_volume': total_volume,
         'average_volume': average_volume,
         'max_price': max_price,
@@ -270,6 +265,20 @@ def get_summary(symbol: str) -> dict:
         # Aggregated metrics for each window
         'aggregated_window_5': aggregated_window_5,
         'aggregated_window_10': aggregated_window_10,
+
+        # Fundamental metrics
+        'trailingPE': fundamentals.get("trailingPE"),
+        'forwardPE': fundamentals.get("forwardPE"),
+        'PEG': fundamentals.get("PEG"),
+        'PGI': fundamentals.get("PGI"),
+        'trailingPEG': fundamentals.get("trailingPEG"),
+        'dividendYield': fundamentals.get("dividendYield"),
+        'beta': fundamentals.get("beta"),
+        'marketCap': fundamentals.get("marketCap"),
+        'priceToBook': fundamentals.get("priceToBook"),
+        'forwardEPS': fundamentals.get("forwardEPS"),
+        'trailingEPS': fundamentals.get("trailingEPS"),
+        'debtToEquity': fundamentals.get("debtToEquity"),
     }
 
     return summary
