@@ -3,6 +3,7 @@ import pandas as pd
 from alpha_vantage.timeseries import TimeSeries
 import yfinance as yf
 import finnhub
+import requests
 
 
 alpha_vantage_api_key = os.environ.get("alpha_vantage_api_key")
@@ -121,7 +122,7 @@ def fetch_peers(symbol: str) -> list:
 def fetch_income_statement(symbol: str) -> dict:
     """
     Fetches the income statement data for the given symbol using the Alpha Vantage API.
-    Returns the JSON response as a dictionary.
+    Returns a dictionary containing the symbol and only the last three annual reports.
     """
     if not alpha_vantage_api_key:
         raise ValueError("Missing 'alpha_vantage_api_key' in environment")
@@ -132,13 +133,19 @@ def fetch_income_statement(symbol: str) -> dict:
     if response.status_code != 200:
         raise Exception(f"Error fetching income statement data: {response.status_code}")
     
-    return response.json()
+    data = response.json()
+    
+    # Remove the quarterlyReports key if it exists.
+    data.pop("quarterlyReports", None)
+    
+    # Filter and sort annualReports to keep only the last three years.
+    if "annualReports" in data:
+        data["annualReports"] = sorted(
+            data["annualReports"],
+            key=lambda x: x.get("fiscalDateEnding", ""),
+            reverse=True
+        )[:3]
+    
+    return data
 
-# Assume the following imports from other modules are present:
-from .indicators import compute_bollinger_bands, compute_rsi
-from .event_detection import (
-    detect_touches, 
-    detect_hug_events,
-    find_short_term_high,
-    find_short_term_low
-)
+

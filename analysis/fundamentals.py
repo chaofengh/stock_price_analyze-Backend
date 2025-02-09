@@ -1,5 +1,5 @@
 # fundamentals.py
-from .data_fetcher import fetch_stock_fundamentals, fetch_peers, fetch_income_statement
+from .data_fetcher import fetch_stock_fundamentals, fetch_peers
 
 def get_fundamentals(symbol: str) -> dict:
     try:
