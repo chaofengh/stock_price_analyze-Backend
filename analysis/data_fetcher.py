@@ -2,20 +2,22 @@ import os
 import pandas as pd
 from alpha_vantage.timeseries import TimeSeries
 import yfinance as yf
-import requests
+import finnhub
 
 
-api_key = os.environ.get("alpha_vantage_api_key")
+alpha_vantage_api_key = os.environ.get("alpha_vantage_api_key")
+finnhub_api_key = os.environ.get("finnhub_api_key")
+finnhub_client = finnhub.Client(api_key=finnhub_api_key)
 
 def fetch_stock_data(symbol: str, outputsize: str = 'compact') -> pd.DataFrame:
     """
     Fetches daily stock data from Alpha Vantage and performs initial cleanup.
     """
     
-    if not api_key:
+    if not alpha_vantage_api_key:
         raise ValueError("Missing 'alpha_vantage_api_key' in environment")
     
-    ts = TimeSeries(key=api_key, output_format='pandas')
+    ts = TimeSeries(key=alpha_vantage_api_key, output_format='pandas')
     data, _ = ts.get_daily(symbol=symbol, outputsize=outputsize)
     
     data.sort_index(inplace=True)
@@ -50,8 +52,6 @@ def fetch_stock_fundamentals(symbol):
       - trailingEPS: Trailing Earnings Per Share.
       - debtToEquity: Debt-to-Equity ratio.
     """
-    import yfinance as yf
-
     ticker = yf.Ticker(symbol)
     info = ticker.info
 
@@ -104,3 +104,41 @@ def fetch_stock_fundamentals(symbol):
         "trailingEPS": trailingEPS,
         "debtToEquity": debtToEquity,
     }
+
+def fetch_peers(symbol: str) -> list:
+    """
+    Fetches a list of peer tickers for a given symbol using Finnhub's company_peers endpoint.
+    Returns an empty list if none are found or if the symbol is invalid.
+    """
+    try:
+        peers = finnhub_client.company_peers(symbol)
+        if isinstance(peers, list):
+            return peers
+        return []
+    except Exception:
+        return []
+    
+def fetch_income_statement(symbol: str) -> dict:
+    """
+    Fetches the income statement data for the given symbol using the Alpha Vantage API.
+    Returns the JSON response as a dictionary.
+    """
+    if not alpha_vantage_api_key:
+        raise ValueError("Missing 'alpha_vantage_api_key' in environment")
+    
+    url = f"https://www.alphavantage.co/query?function=INCOME_STATEMENT&symbol={symbol}&apikey={alpha_vantage_api_key}"
+    response = requests.get(url)
+    
+    if response.status_code != 200:
+        raise Exception(f"Error fetching income statement data: {response.status_code}")
+    
+    return response.json()
+
+# Assume the following imports from other modules are present:
+from .indicators import compute_bollinger_bands, compute_rsi
+from .event_detection import (
+    detect_touches, 
+    detect_hug_events,
+    find_short_term_high,
+    find_short_term_low
+)

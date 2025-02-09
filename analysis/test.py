@@ -1,17 +1,4 @@
+import finnhub
+finnhub_client = finnhub.Client(api_key="cuim17hr01qtqfmj0lt0cuim17hr01qtqfmj0ltg")
 
-import yfinance as yf
-
-ticker=yf.Ticker('nvda')
-info=ticker.info
-
-
-trailing_pe = info.get("trailingPE")
-if trailing_pe is not None:
-    pe_ratio = float(trailing_pe)
-else:
-    pe_ratio = None
-
-print(pe_ratio)
-
-
-print(info)
+print(finnhub_client.company_peers('nvda'))

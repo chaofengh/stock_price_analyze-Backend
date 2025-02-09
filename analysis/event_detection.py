@@ -107,3 +107,5 @@ def find_short_term_low(df, start_idx, window=5):
     lowest_idx = window_slice['close'].idxmin()
     lowest_price = window_slice['close'].min()
     return (lowest_idx, lowest_price)
+
+
