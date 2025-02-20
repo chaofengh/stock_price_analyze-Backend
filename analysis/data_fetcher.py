@@ -191,4 +191,3 @@ def fetch_income_statement(symbol: str) -> dict:
     
     return data
 
-

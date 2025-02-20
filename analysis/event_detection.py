@@ -25,7 +25,7 @@ def detect_touches(data: pd.DataFrame) -> list:
             })
     return touches
 
-def detect_hug_events(data: pd.DataFrame, touches: list, threshold: float = 1.0) -> (list, list):
+def detect_hug_events(data: pd.DataFrame, touches: list, threshold: float = 1.0):
     """
     Detects multi-day hugs where prices remain near the Bollinger Bands.
     """

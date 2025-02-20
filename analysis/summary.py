@@ -9,28 +9,32 @@ from .fundamentals import get_fundamentals, get_peers, get_peers_fundamentals, c
 
 def get_summary(symbol: str) -> dict:
     # 1. Fetch and prepare data
-    data = prepare_stock_data(symbol)
-    analysis_period, initial_price, final_price = get_trading_period(data)
-    n = len(data)
+    data_dict = prepare_stock_data(symbol)
+    print(data_dict)
+    if symbol not in data_dict:
+        raise ValueError(f"No data found for symbol {symbol}")
+    df = data_dict[symbol]
+    analysis_period, initial_price, final_price = get_trading_period(df)
+    n = len(df)
     
     # 2. Detect touches & hug events
-    touches, hug_events_upper, hug_events_lower = get_touch_and_hug_events(data)
+    touches, hug_events_upper, hug_events_lower = get_touch_and_hug_events(df)
     
     # 3. Compute bounce/pullback events
-    results_window_5 = compute_bounces_and_pullbacks(data, touches, hug_events_upper, hug_events_lower, window=5)
-    results_window_10 = compute_bounces_and_pullbacks(data, touches, hug_events_upper, hug_events_lower, window=10)
+    results_window_5 = compute_bounces_and_pullbacks(df, touches, hug_events_upper, hug_events_lower, window=5)
+    results_window_10 = compute_bounces_and_pullbacks(df, touches, hug_events_upper, hug_events_lower, window=10)
     
     # 4. Compute aggregated metrics
     aggregated_window_5 = compute_aggregates(results_window_5, hug_events_upper, hug_events_lower)
     aggregated_window_10 = compute_aggregates(results_window_10, hug_events_upper, hug_events_lower)
     
     # 5. Compute additional metrics and average hug lengths
-    add_metrics = compute_additional_metrics(data, initial_price, final_price)
+    add_metrics = compute_additional_metrics(df, initial_price, final_price)
     avg_upper_hug_length = compute_avg_hug_length(hug_events_upper)
     avg_lower_hug_length = compute_avg_hug_length(hug_events_lower)
     
     # 6. Build chart data
-    chart_data = build_chart_data(data, touches, hug_events_upper + hug_events_lower)
+    chart_data = build_chart_data(df, touches, hug_events_upper + hug_events_lower)
     
     # 7. Fundamentals and peer analysis
     fundamentals = get_fundamentals(symbol)
