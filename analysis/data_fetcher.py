@@ -10,30 +10,73 @@ alpha_vantage_api_key = os.environ.get("alpha_vantage_api_key")
 finnhub_api_key = os.environ.get("finnhub_api_key")
 finnhub_client = finnhub.Client(api_key=finnhub_api_key)
 
-def fetch_stock_data(symbol: str, outputsize: str = 'compact') -> pd.DataFrame:
+def fetch_stock_data(symbols, period="6mo", interval="1d"):
     """
-    Fetches daily stock data from Alpha Vantage and performs initial cleanup.
+    Fetches daily stock data from yfinance for a single symbol or a list of symbols,
+    returning a dictionary of DataFrames keyed by symbol.
+
+    :param symbols: A single ticker as a string or a list of ticker symbols.
+    :param period: Data period to fetch (default "1y" = 1 year).
+    :param interval: Data interval (e.g. "1d", "1wk").
+    :return: dict of { 'AAPL': DataFrame, 'TSLA': DataFrame, ... }
     """
-    
-    if not alpha_vantage_api_key:
-        raise ValueError("Missing 'alpha_vantage_api_key' in environment")
-    
-    ts = TimeSeries(key=alpha_vantage_api_key, output_format='pandas')
-    data, _ = ts.get_daily(symbol=symbol, outputsize=outputsize)
-    
-    data.sort_index(inplace=True)
-    data.rename(columns={
-        '1. open': 'open',
-        '2. high': 'high',
-        '3. low':  'low',
-        '4. close': 'close',
-        '5. volume': 'volume'
-    }, inplace=True)
-    
-    data.reset_index(inplace=True)
-    data.rename(columns={'index': 'date'}, inplace=True)
-    data['date'] = pd.to_datetime(data['date'])
-    return data
+    # Convert a single symbol (string) to a list
+    if isinstance(symbols, str):
+        symbols = [symbols]
+
+    # Download data for all symbols in one batch request
+    raw_data = yf.download(
+        tickers=" ".join(symbols),
+        period=period,
+        interval=interval,
+        group_by="ticker",
+        auto_adjust=False,
+        threads=True
+    )
+
+    data_dict = {}
+
+    # For a single ticker, yfinance returns a standard DataFrame
+    if len(symbols) == 1:
+        symbol = symbols[0]
+        df = raw_data.copy()
+        df.reset_index(inplace=True)
+
+        # Rename columns to match your format
+        df.rename(columns={
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume",
+            "Date": "date"
+        }, inplace=True)
+
+        df["date"] = pd.to_datetime(df["date"])
+        df.sort_values("date", inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        data_dict[symbol] = df
+
+    else:
+        # For multiple tickers, yfinance returns a multi-index DataFrame
+        for symbol in symbols:
+            ticker_df = raw_data[symbol].copy()
+            ticker_df.reset_index(inplace=True)
+            ticker_df.rename(columns={
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Volume": "volume",
+                "Date": "date"
+            }, inplace=True)
+
+            ticker_df["date"] = pd.to_datetime(ticker_df["date"])
+            ticker_df.sort_values("date", inplace=True)
+            ticker_df.reset_index(drop=True, inplace=True)
+            data_dict[symbol] = ticker_df
+
+    return data_dict
 
 def fetch_stock_fundamentals(symbol):
     """
