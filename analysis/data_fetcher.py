@@ -11,7 +11,7 @@ finnhub_api_key = os.environ.get("finnhub_api_key")
 finnhub_client = finnhub.Client(api_key=finnhub_api_key)
 
 
-def fetch_stock_data(symbols, period="6mo", interval="1d"):
+def fetch_stock_data(symbols, period="4mo", interval="1d"):
     if isinstance(symbols, str):
         symbols = [symbols]
 
