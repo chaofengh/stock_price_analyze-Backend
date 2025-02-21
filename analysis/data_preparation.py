@@ -5,7 +5,8 @@ from .indicators import compute_bollinger_bands, compute_rsi
 
 def prepare_stock_data(symbols):
     """
-    Fetches data for multiple symbols, then computes Bollinger Bands & RSI.
+    Fetches data for multiple symbols, theclear
+    n computes Bollinger Bands & RSI.
     Returns a dictionary of DataFrames keyed by symbol.
     """
     data_dict = fetch_stock_data(symbols)

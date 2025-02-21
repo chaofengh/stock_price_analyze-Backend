@@ -10,23 +10,16 @@ alpha_vantage_api_key = os.environ.get("alpha_vantage_api_key")
 finnhub_api_key = os.environ.get("finnhub_api_key")
 finnhub_client = finnhub.Client(api_key=finnhub_api_key)
 
-def fetch_stock_data(symbols, period="6mo", interval="1d"):
-    """
-    Fetches daily stock data from yfinance for a single symbol or a list of symbols,
-    returning a dictionary of DataFrames keyed by symbol.
 
-    :param symbols: A single ticker as a string or a list of ticker symbols.
-    :param period: Data period to fetch (default "1y" = 1 year).
-    :param interval: Data interval (e.g. "1d", "1wk").
-    :return: dict of { 'AAPL': DataFrame, 'TSLA': DataFrame, ... }
-    """
-    # Convert a single symbol (string) to a list
+def fetch_stock_data(symbols, period="6mo", interval="1d"):
     if isinstance(symbols, str):
         symbols = [symbols]
 
-    # Download data for all symbols in one batch request
+    # Normalize all symbols to uppercase
+    upper_symbols = [sym.upper() for sym in symbols]
+
     raw_data = yf.download(
-        tickers=" ".join(symbols),
+        tickers=" ".join(upper_symbols),
         period=period,
         interval=interval,
         group_by="ticker",
@@ -36,47 +29,42 @@ def fetch_stock_data(symbols, period="6mo", interval="1d"):
 
     data_dict = {}
 
-    # For a single ticker, yfinance returns a standard DataFrame
-    if len(symbols) == 1:
-        symbol = symbols[0]
-        df = raw_data.copy()
-        df.reset_index(inplace=True)
+    for original_sym, upper_sym in zip(symbols, upper_symbols):
+        try:
+            ticker_df = raw_data[upper_sym].copy()
+        except KeyError:
+            print(f"Ticker {upper_sym} not found in raw_data for user symbol {original_sym}")
+            continue
 
-        # Rename columns to match your format
-        df.rename(columns={
+        ticker_df.reset_index(inplace=True)
+
+        # Build a rename dict
+        rename_dict = {
+            "Date": "date",
             "Open": "open",
             "High": "high",
             "Low": "low",
-            "Close": "close",
-            "Volume": "volume",
-            "Date": "date"
-        }, inplace=True)
+            "Volume": "volume"
+        }
+        if "Adj Close" in ticker_df.columns:
+            rename_dict["Adj Close"] = "close"
+        elif "Close" in ticker_df.columns:
+            rename_dict["Close"] = "close"
 
-        df["date"] = pd.to_datetime(df["date"])
-        df.sort_values("date", inplace=True)
-        df.reset_index(drop=True, inplace=True)
-        data_dict[symbol] = df
+        ticker_df.rename(columns=rename_dict, inplace=True)
 
-    else:
-        # For multiple tickers, yfinance returns a multi-index DataFrame
-        for symbol in symbols:
-            ticker_df = raw_data[symbol].copy()
-            ticker_df.reset_index(inplace=True)
-            ticker_df.rename(columns={
-                "Open": "open",
-                "High": "high",
-                "Low": "low",
-                "Close": "close",
-                "Volume": "volume",
-                "Date": "date"
-            }, inplace=True)
+        # Clean up index and dates
+        ticker_df["date"] = pd.to_datetime(ticker_df["date"])
+        ticker_df.sort_values("date", inplace=True)
+        ticker_df.reset_index(drop=True, inplace=True)
 
-            ticker_df["date"] = pd.to_datetime(ticker_df["date"])
-            ticker_df.sort_values("date", inplace=True)
-            ticker_df.reset_index(drop=True, inplace=True)
-            data_dict[symbol] = ticker_df
+        # Store the cleaned DataFrame in data_dict under the ORIGINAL symbol 
+        # (so data_dict has the same key the user typed in)
+        data_dict[original_sym] = ticker_df
 
     return data_dict
+
+
 
 def fetch_stock_fundamentals(symbol):
     """
