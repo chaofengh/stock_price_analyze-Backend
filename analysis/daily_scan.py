@@ -1,6 +1,4 @@
 # daily_scan.py
-import schedule
-import time
 from datetime import datetime
 from .data_preparation import prepare_stock_data
 
@@ -13,8 +11,11 @@ TICKERS = [
 ]
 
 def check_bollinger_touch(data_dict):
-    """Returns a list of tickers whose latest close touches or exceeds Bollinger bands."""
-    touched = []
+    """
+    Return a list of dicts with detailed info if the latest close 
+    touches or exceeds Bollinger bands.
+    """
+    touched_details = []
     for symbol, df in data_dict.items():
         if len(df) < 1:
             continue
@@ -23,29 +24,34 @@ def check_bollinger_touch(data_dict):
         bb_upper = last_row['BB_upper']
         bb_lower = last_row['BB_lower']
 
+        # Check for touch/exceed
         if close_price >= bb_upper or close_price <= bb_lower:
-            touched.append(symbol)
-    return touched
+            side = "Upper" if close_price >= bb_upper else "Lower"
+            touched_details.append({
+                "symbol": symbol,
+                "close_price": float(close_price),
+                "bb_upper": float(bb_upper),
+                "bb_lower": float(bb_lower),
+                "touched_side": side
+            })
+    return touched_details
 
 def daily_scan():
-    print(f"Running daily scan at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    """
+    Perform the daily scan, returning a dict with:
+      - timestamp (str)
+      - alerts (list of dict)
+    """
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     data_dict = prepare_stock_data(TICKERS)
-    touched_symbols = check_bollinger_touch(data_dict)
+    touched_details = check_bollinger_touch(data_dict)
 
-    if touched_symbols:
-        print("ALERT: The following tickers touched Bollinger Bands:")
-        print(", ".join(touched_symbols))
-    else:
-        print("No tickers touched the Bollinger Bands today.")
-
-# Schedule the job at 16:00 (4PM)
-schedule.every().day.at("16:00").do(daily_scan)
+    return {
+        "timestamp": timestamp,
+        "alerts": touched_details
+    }
 
 if __name__ == "__main__":
-    # If you want to run the scheduled scan continuously:
-    # while True:
-    #     schedule.run_pending()
-    #     time.sleep(60)  # check every minute
-
-    # OR, if you just want to run the scan manually for testing:
-    daily_scan()
+    # For quick local testing
+    result = daily_scan()
+    print(result)
