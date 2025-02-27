@@ -16,6 +16,7 @@ def build_chart_data(data, touches, hug_events) -> list:
             'upper': float(data.loc[i, 'BB_upper']) if not pd.isna(data.loc[i, 'BB_upper']) else None,
             'lower': float(data.loc[i, 'BB_lower']) if not pd.isna(data.loc[i, 'BB_lower']) else None,
             'isTouch': (i in touch_indices),
-            'isHug': (i in hug_indices)
+            'isHug': (i in hug_indices),
+            'volume': float(data.loc[i, 'volume'])
         })
     return chart_data
