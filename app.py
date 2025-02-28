@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 from analysis.daily_scan import daily_scan
 
-
 load_dotenv()
 frontend_origin = os.getenv('front_end_client_website')
 
@@ -56,7 +55,7 @@ def summary_endpoint():
 # This variable holds the most recent scan result.
 # It gets overwritten every time daily_scan runs.
 latest_scan_result = None
-
+print('asdasdasdasd')
 def daily_scan_wrapper():
     """
     Run daily_scan and store the result for broadcasting.

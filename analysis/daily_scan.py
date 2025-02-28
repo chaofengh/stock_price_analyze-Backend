@@ -7,7 +7,7 @@ TICKERS = [
     "DFS", "META", "GS", "NVDA", "PYPL", "SPOT", "ABNB", "CRM",
     "UBER", "ZM", "TGT", "ADBE", "AMZN", "HD", "PINS", "AAPL",
     "BBY", "V", "COST", "WMT", "MSFT", "DIS", "SBUX", "JPM",
-    "LULU", "MCD", "T"
+    "LULU", "MCD", "T",'QQQ'
 ]
 
 def check_bollinger_touch(data_dict):
