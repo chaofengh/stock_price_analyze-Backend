@@ -70,6 +70,56 @@ def fetch_stock_data(symbols, period="4mo", interval="1d"):
 
     return data_dict
 
+def fetch_stock_option_data(ticker: str, expiration: str = None, all_expirations: bool = False):
+    """
+    Fetch option chain data (calls/puts) for a given ticker using yfinance.
+
+    :param ticker: The stock ticker symbol (e.g., 'AAPL', 'TSLA', etc.)
+    :param expiration: A specific expiration date in 'YYYY-MM-DD' format.
+                       If provided, only that date's options are fetched.
+    :param all_expirations: If True, fetch option chains for all available expiration dates.
+                           (Ignored if 'expiration' is given.)
+    :return: 
+        - If 'expiration' is provided, returns a dict with {'calls': DataFrame, 'puts': DataFrame}.
+        - If 'all_expirations' is True, returns a dict of expiration -> {'calls': DataFrame, 'puts': DataFrame}.
+    """
+    ticker_obj = yf.Ticker(ticker)
+
+    # If a single expiration date is specified, fetch that chain
+    if expiration:
+        chain = ticker_obj.option_chain(expiration)
+        return {
+            "calls": chain.calls,
+            "puts": chain.puts
+        }
+
+    # Otherwise, fetch all available expirations if all_expirations=True
+    if all_expirations:
+        # yfinance offers a list of expiration dates for each ticker
+        expirations = ticker_obj.options
+        all_data = {}
+        
+        for exp_date in expirations:
+            chain = ticker_obj.option_chain(exp_date)
+            all_data[exp_date] = {
+                "calls": chain.calls,
+                "puts": chain.puts
+            }
+        
+        return all_data
+    
+    # If neither 'expiration' nor 'all_expirations' is set,
+    # just grab the first available expiration by default
+    first_exp = ticker_obj.options[0] if ticker_obj.options else None
+    if first_exp:
+        chain = ticker_obj.option_chain(first_exp)
+        return {
+            "calls": chain.calls,
+            "puts": chain.puts
+        }
+    else:
+        raise ValueError(f"No options data found for ticker '{ticker}'.")
+
 
 
 
