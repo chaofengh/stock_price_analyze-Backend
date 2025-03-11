@@ -4,7 +4,8 @@ from alpha_vantage.timeseries import TimeSeries
 import yfinance as yf
 import finnhub
 import requests
-
+from dotenv import load_dotenv
+load_dotenv()
 
 alpha_vantage_api_key = os.environ.get("alpha_vantage_api_key")
 finnhub_api_key = os.environ.get("finnhub_api_key")
