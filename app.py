@@ -111,10 +111,25 @@ def delete_ticker():
 @app.route('/api/tickers', methods=['GET'])
 def get_tickers():
     try:
+        # Get the list of tickers from the database
         tickers = get_all_tickers()
-        return jsonify(tickers), 200
+        
+        # Import the fetch_stock_data function if not in the same module
+        from analysis.data_preparation import fetch_stock_data  # adjust import as needed
+        
+        # Call fetch_stock_data to get intraday data for all tickers
+        # For intraday price movement, we use period="1d" and interval="1min"
+        intraday_data = fetch_stock_data(tickers, period="1d", interval="15m")
+        
+        # Serialize each DataFrame to a list of dictionaries for JSON output
+        serialized_data = {}
+        for ticker, df in intraday_data.items():
+            serialized_data[ticker] = df.to_dict(orient='records')
+        
+        return jsonify(serialized_data), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 #  Endpoint: Insert ticker(s)
 @app.route('/api/tickers', methods=['POST'])

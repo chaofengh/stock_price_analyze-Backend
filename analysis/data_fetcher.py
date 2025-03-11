@@ -5,6 +5,7 @@ import yfinance as yf
 import finnhub
 import requests
 from dotenv import load_dotenv
+import numpy as np
 load_dotenv()
 
 alpha_vantage_api_key = os.environ.get("alpha_vantage_api_key")
@@ -16,7 +17,7 @@ def fetch_stock_data(symbols, period="4mo", interval="1d"):
     if isinstance(symbols, str):
         symbols = [symbols]
 
-    # Normalize all symbols to uppercase
+    # Normalize symbols to uppercase
     upper_symbols = [sym.upper() for sym in symbols]
 
     raw_data = yf.download(
@@ -39,9 +40,16 @@ def fetch_stock_data(symbols, period="4mo", interval="1d"):
 
         ticker_df.reset_index(inplace=True)
 
-        # Build a rename dict
+        # Check if the datetime column is labeled as 'Date' or 'Datetime'
+        if "Date" in ticker_df.columns:
+            date_col = "Date"
+        elif "Datetime" in ticker_df.columns:
+            date_col = "Datetime"
+        else:
+            date_col = ticker_df.columns[0]  # fallback if needed
+
         rename_dict = {
-            "Date": "date",
+            date_col: "date",
             "Open": "open",
             "High": "high",
             "Low": "low",
@@ -53,17 +61,15 @@ def fetch_stock_data(symbols, period="4mo", interval="1d"):
             rename_dict["Close"] = "close"
 
         ticker_df.rename(columns=rename_dict, inplace=True)
-
-        # Clean up index and dates
         ticker_df["date"] = pd.to_datetime(ticker_df["date"])
         ticker_df.sort_values("date", inplace=True)
         ticker_df.reset_index(drop=True, inplace=True)
+        ticker_df = ticker_df.replace({np.nan:None, np.inf:None, -np.inf:None})
 
-        # Store the cleaned DataFrame in data_dict under the ORIGINAL symbol 
-        # (so data_dict has the same key the user typed in)
         data_dict[original_sym] = ticker_df
 
     return data_dict
+
 
 
 
