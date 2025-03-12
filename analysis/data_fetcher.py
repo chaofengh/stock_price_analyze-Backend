@@ -1,3 +1,4 @@
+#data_fetcher.py
 import os
 import pandas as pd
 from alpha_vantage.timeseries import TimeSeries
@@ -70,55 +71,133 @@ def fetch_stock_data(symbols, period="4mo", interval="1d"):
 
     return data_dict
 
-def fetch_stock_option_data(ticker: str, expiration: str = None, all_expirations: bool = False):
-    """
-    Fetch option chain data (calls/puts) for a given ticker using yfinance.
 
-    :param ticker: The stock ticker symbol (e.g., 'AAPL', 'TSLA', etc.)
+def fetch_stock_option_data(
+    ticker: str,
+    expiration: str = None,
+    all_expirations: bool = False,
+    option_type: str = None
+):
+    """
+    Fetch option chain data (calls/puts) for a given ticker using yfinance,
+    along with the latest trading price of the stock.
+
+    :param ticker: The stock ticker symbol (e.g., 'AAPL', 'TSLA').
     :param expiration: A specific expiration date in 'YYYY-MM-DD' format.
                        If provided, only that date's options are fetched.
-    :param all_expirations: If True, fetch option chains for all available expiration dates.
+    :param all_expirations: If True, fetch option chains for all available expirations.
                            (Ignored if 'expiration' is given.)
-    :return: 
-        - If 'expiration' is provided, returns a dict with {'calls': DataFrame, 'puts': DataFrame}.
-        - If 'all_expirations' is True, returns a dict of expiration -> {'calls': DataFrame, 'puts': DataFrame}.
+    :param option_type: 'calls', 'puts', or None.
+                       - If 'calls', only return the calls DataFrame.
+                       - If 'puts', only return the puts DataFrame.
+                       - If None, return a dict {'calls': DataFrame, 'puts': DataFrame}.
+    :return:
+        {
+          "ticker": <str>,
+          "stock_price": <float or None>,
+          "option_data": <DataFrame or dict of DataFrames>
+        }
     """
+
+    # Create the ticker object
     ticker_obj = yf.Ticker(ticker)
 
-    # If a single expiration date is specified, fetch that chain
+    # Attempt to get the latest trading price of the stock
+    # This will return daily historical data for 1 day
+    stock_info = ticker_obj.history(period='1d')
+    if not stock_info.empty:
+        # The 'Close' price on the last row is typically the latest trading price
+        latest_price = float(stock_info['Close'].iloc[-1])
+    else:
+        # If we fail to fetch data, set price to None or handle as needed
+        latest_price = None
+
+    # 1) Single expiration date
     if expiration:
         chain = ticker_obj.option_chain(expiration)
-        return {
-            "calls": chain.calls,
-            "puts": chain.puts
-        }
+        calls_df = chain.calls
+        puts_df = chain.puts
 
-    # Otherwise, fetch all available expirations if all_expirations=True
+        if option_type == 'calls':
+            return {
+                "ticker": ticker,
+                "stock_price": latest_price,
+                "option_data": calls_df
+            }
+        elif option_type == 'puts':
+            return {
+                "ticker": ticker,
+                "stock_price": latest_price,
+                "option_data": puts_df
+            }
+        else:
+            return {
+                "ticker": ticker,
+                "stock_price": latest_price,
+                "option_data": {
+                    "calls": calls_df,
+                    "puts": puts_df
+                }
+            }
+
+    # 2) All expirations
     if all_expirations:
-        # yfinance offers a list of expiration dates for each ticker
-        expirations = ticker_obj.options
+        expirations = ticker_obj.options  # list of dates as strings
         all_data = {}
-        
+
         for exp_date in expirations:
             chain = ticker_obj.option_chain(exp_date)
-            all_data[exp_date] = {
-                "calls": chain.calls,
-                "puts": chain.puts
-            }
-        
-        return all_data
-    
-    # If neither 'expiration' nor 'all_expirations' is set,
-    # just grab the first available expiration by default
-    first_exp = ticker_obj.options[0] if ticker_obj.options else None
-    if first_exp:
-        chain = ticker_obj.option_chain(first_exp)
+            calls_df = chain.calls
+            puts_df = chain.puts
+
+            if option_type == 'calls':
+                all_data[exp_date] = calls_df
+            elif option_type == 'puts':
+                all_data[exp_date] = puts_df
+            else:
+                all_data[exp_date] = {
+                    "calls": calls_df,
+                    "puts": puts_df
+                }
+
         return {
-            "calls": chain.calls,
-            "puts": chain.puts
+            "ticker": ticker,
+            "stock_price": latest_price,
+            "option_data": all_data
+        }
+
+    # 3) If neither 'expiration' nor 'all_expirations' is set,
+    #    fetch the first available expiration by default
+    available_exps = ticker_obj.options
+    if not available_exps:
+        raise ValueError(f"No option expiration dates found for {ticker}.")
+
+    first_exp = available_exps[0]
+    chain = ticker_obj.option_chain(first_exp)
+    calls_df = chain.calls
+    puts_df = chain.puts
+
+    if option_type == 'calls':
+        return {
+            "ticker": ticker,
+            "stock_price": latest_price,
+            "option_data": calls_df
+        }
+    elif option_type == 'puts':
+        return {
+            "ticker": ticker,
+            "stock_price": latest_price,
+            "option_data": puts_df
         }
     else:
-        raise ValueError(f"No options data found for ticker '{ticker}'.")
+        return {
+            "ticker": ticker,
+            "stock_price": latest_price,
+            "option_data": {
+                "calls": calls_df,
+                "puts": puts_df
+            }
+        }
 
 
 

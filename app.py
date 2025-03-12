@@ -10,6 +10,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from routes.summary_routes import summary_blueprint
 from routes.alerts_routes import alerts_blueprint
 from routes.tickers_routes import tickers_blueprint
+from routes.Option_price_ratio_routes import option_price_ratio_blueprint
 
 # Import your scheduled job wrapper
 from tasks.daily_scan_tasks import daily_scan_wrapper
@@ -28,6 +29,7 @@ def create_app():
     app.register_blueprint(summary_blueprint)
     app.register_blueprint(alerts_blueprint)
     app.register_blueprint(tickers_blueprint)
+    app.register_blueprint(option_price_ratio_blueprint)
 
     return app
 

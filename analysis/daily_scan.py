@@ -1,4 +1,4 @@
-# analysis/daily_scan.py
+#daily_scan.py
 from datetime import datetime
 from .data_preparation import prepare_stock_data
 from database.ticker_repository import get_all_tickers

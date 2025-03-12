@@ -1,3 +1,4 @@
+#event_detection.py
 import pandas as pd
 
 # Touch detection remains largely the same
