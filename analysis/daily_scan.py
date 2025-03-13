@@ -4,10 +4,6 @@ from .data_preparation import prepare_stock_data
 from database.ticker_repository import get_all_tickers
 
 def check_bollinger_touch(data_dict):
-    """
-    Return a list of dicts with detailed info if the latest close 
-    touches or exceeds Bollinger bands, including the last 7 closes.
-    """
     touched_details = []
     for symbol, df in data_dict.items():
         if len(df) < 1:
@@ -18,11 +14,14 @@ def check_bollinger_touch(data_dict):
         bb_upper = last_row['BB_upper']
         bb_lower = last_row['BB_lower']
 
+        # Skip this symbol if any of these are None
+        if None in [close_price, bb_upper, bb_lower]:
+            continue
+
         if close_price >= bb_upper or close_price <= bb_lower:
             side = "Upper" if close_price >= bb_upper else "Lower"
 
             recent_closes = df['close'].tail(7).tolist()
-
             touched_details.append({
                 "symbol": symbol,
                 "close_price": float(close_price),
@@ -33,6 +32,7 @@ def check_bollinger_touch(data_dict):
             })
 
     return touched_details
+
 
 def daily_scan():
     """
