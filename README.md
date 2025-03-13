@@ -73,3 +73,67 @@ To start the backend in development mode, run your main application file (e.g., 
 
 ```bash
 python main_application.py
+```
+
+# API Endpoints
+
+## Alerts
+
+- **GET** `/api/alerts/stream`  
+  Streams the latest scan result via Server-Sent Events (SSE).
+
+- **GET** `/api/alerts/latest`  
+  Retrieves the latest scan result as JSON.
+
+## Summary
+
+- **GET** `/api/summary?symbol=<SYMBOL>`  
+  Returns the analysis summary for the provided stock symbol.
+
+## Tickers
+
+- **GET** `/api/tickers`  
+  Retrieves intraday data for all tickers in the database.
+
+- **POST** `/api/tickers`  
+  Adds new tickers. Accepts payloads like:
+
+## Option Price Ratio
+
+- **GET** `/api/option-price-ratio`  
+  Computes and returns the best out-of-the-money put option for each ticker along with relevant ratios and error messages if applicable.
+
+## Scheduled Tasks
+
+### Daily Scan
+
+A background job that:
+- Fetches ticker data from the database.
+- Prepares and analyzes the stock data.
+- Detects Bollinger Band touches.
+- Updates a global variable (`latest_scan_result`) used for alerts.
+
+This job is scheduled to run every weekday at 4:30 PM via APScheduler.
+
+## Additional Functionality
+
+- **Technical Indicators:**  
+  Utilizes TA-Lib to compute Bollinger Bands and RSI.
+
+- **Data Preparation & Event Detection:**  
+  Prepares stock data for analysis and identifies price events such as touches and hugs.
+
+- **Peer Analysis:**  
+  Compares a stock's fundamentals against its peers by fetching data from external APIs.
+
+- **Chart Data Builder:**  
+  Prepares data formatted for front-end visualization.
+
+## Contributing
+
+Contributions are welcome! Please fork the repository and submit a pull request with your improvements.
+
+## License
+
+This project is licensed under the MIT License.
+
