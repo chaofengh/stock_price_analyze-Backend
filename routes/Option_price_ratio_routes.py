@@ -70,6 +70,8 @@ def get_option_price_ratio():
 
                 # Filter for out-of-the-money put options (strike < stock_price)
                 otm_puts = option_data[option_data['strike'] < stock_price]
+                print(otm_puts[['strike', 'lastPrice', 'bid', 'ask']])
+
                 if otm_puts.empty:
                     results.append({
                         "ticker": ticker,
@@ -83,6 +85,12 @@ def get_option_price_ratio():
                 best_row = otm_puts.loc[best_idx].to_dict()
                 best_price = best_row.get('lastPrice')
                 best_ratio = best_price / stock_price if stock_price else None
+
+                print('ticker: ',ticker)
+                print('best_row: ',best_row)
+                print('best_price: ',best_price)
+                print('stock_price: ',stock_price)
+                print('\n')
 
                 # 4) Add the result for this ticker
                 results.append({
