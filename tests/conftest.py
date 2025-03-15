@@ -1,9 +1,15 @@
 # tests/conftest.py
-import pytest
-from app import create_app
 import os
+from dotenv import load_dotenv
+
+# Load the .env file first (if it exists)
+load_dotenv()
+
+# Then override the DATABASE_URL for tests
 os.environ["DATABASE_URL"] = "postgresql://dummy:dummy@localhost/dummy"
 
+import pytest
+from app import create_app
 
 @pytest.fixture(scope="session")
 def app():
