@@ -86,11 +86,6 @@ def get_option_price_ratio():
                 best_price = best_row.get('lastPrice')
                 best_ratio = best_price / stock_price if stock_price else None
 
-                print('ticker: ',ticker)
-                print('best_row: ',best_row)
-                print('best_price: ',best_price)
-                print('stock_price: ',stock_price)
-                print('\n')
 
                 # 4) Add the result for this ticker
                 results.append({
