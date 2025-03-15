@@ -9,8 +9,8 @@ def client():
     """
     A Pytest fixture that initializes a Flask test client.
     """
-    app = create_app()
-    app.config['TESTING'] = True
+    # Pass testing=True so the CORS configuration is set appropriately
+    app = create_app(testing=True)
     with app.test_client() as client:
         yield client
 
