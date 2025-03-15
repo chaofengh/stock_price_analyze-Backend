@@ -15,9 +15,12 @@ def test_detect_touches():
     touches = detect_touches(df)
     # We expect:
     # day 1: high(10) >= BB_upper(9)? => yes, so touches upper
+    # day 1: low(5) <= BB_lower(7)? => yes, so touches lower
     # day 2: high(11) >= BB_upper(10)? => yes, upper
+    # day 2: low(5) <= BB_lower(6)? => yes, lower
     # day 3: low(5) <= BB_lower(5)? => yes, lower
-    assert len(touches) == 3
+    # day 3: high(12) >= BB_upper(12)? => yes, upper
+    assert len(touches) == 6
 
 def test_detect_hug_events():
     df = pd.DataFrame({

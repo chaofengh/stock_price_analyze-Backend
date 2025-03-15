@@ -2,6 +2,7 @@
 from .event_detection import detect_touches, detect_hug_events, find_short_term_high, find_short_term_low
 
 def get_touch_and_hug_events(data):
+    print('this is print from get_touch_and_hug_events: \n',data)
     touches = detect_touches(data)
     hug_events_upper, hug_events_lower = detect_hug_events(data, touches)
     return touches, hug_events_upper, hug_events_lower
