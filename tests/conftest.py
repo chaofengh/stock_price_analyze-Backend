@@ -2,14 +2,14 @@
 import os
 from dotenv import load_dotenv
 from unittest.mock import patch, MagicMock
+import pytest
 
-# Load environment variables from .env first (if exists)
+# Load environment variables from .env (if exists)
 load_dotenv()
 
-# Override DATABASE_URL to avoid accidental connections
+# Override DATABASE_URL to avoid accidental real DB connections
 os.environ["DATABASE_URL"] = "postgresql://dummy:dummy@localhost/dummy"
 
-import pytest
 from app import create_app
 
 @pytest.fixture(scope="session")
@@ -31,7 +31,6 @@ def app():
     # Teardown: stop patching when tests are done
     yield flask_app
     connection_patch.stop()
-
 
 @pytest.fixture
 def client(app):
