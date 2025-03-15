@@ -14,19 +14,19 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v3
 
+      # 1) Get Python 3.11 from GitHub's toolcache (includes headers)
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11.0'
 
-      # Make sure we have Python dev headers and a compiler
+      # 2) Install a compiler toolchain (build-essential) so we can compile C/C++ code
       - name: Install system prerequisites
         run: |
           sudo apt-get update
-          # python3.11-dev includes headers needed to build Python C extensions
-          # build-essential includes gcc/g++ and related dev tools
-          sudo apt-get install -y python3.11-dev build-essential wget
+          sudo apt-get install -y build-essential wget
 
+      # 3) (Optional) Build and install TA-Lib from source
       - name: Install TA-Lib system library (from source)
         run: |
           wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
@@ -37,14 +37,17 @@ jobs:
           sudo make install
           sudo ldconfig
 
+      # 4) Upgrade pip, setuptools, wheel
       - name: Upgrade pip, setuptools, wheel
         run: |
           python -m pip install --upgrade pip setuptools wheel
 
+      # 5) Install your Python dependencies
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
 
+      # 6) Run tests
       - name: Run tests
         run: |
           pytest
