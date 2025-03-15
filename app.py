@@ -1,4 +1,4 @@
-#app.py
+# app.py
 import os
 import atexit
 
@@ -16,16 +16,22 @@ from routes.Option_price_ratio_routes import option_price_ratio_blueprint
 # Import your scheduled job wrapper
 from tasks.daily_scan_tasks import daily_scan_wrapper
 
-def create_app():
+def create_app(testing=False):
     """
     Application factory that configures and returns the Flask app.
     """
     load_dotenv()
-    frontend_origin = os.getenv('front_end_client_website')
-
     app = Flask(__name__)
-    CORS(app, resources={r"/api/*": {"origins": frontend_origin}})
+    app.config['TESTING'] = testing
 
+    # Use different CORS origins based on whether we are testing or not.
+    if testing:
+        # During tests, use a wildcard to avoid CORS issues when Origin is missing.
+        CORS(app, resources={r"/api/*": {"origins": "*"}})
+    else:
+        frontend_origin = os.getenv('front_end_client_website')
+        CORS(app, resources={r"/api/*": {"origins": frontend_origin}})
+    
     # Register the blueprint modules
     app.register_blueprint(summary_blueprint)
     app.register_blueprint(alerts_blueprint)
