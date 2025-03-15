@@ -31,7 +31,7 @@ def create_app(testing=False):
     if testing:
         frontend_origin = "*"
     else:
-        frontend_origin = os.getenv('front_end_client_website') or "*"
+        frontend_origin = os.getenv('front_end_client_website')
     
     app = Flask(__name__)
     app.config["TESTING"] = testing
