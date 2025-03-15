@@ -19,6 +19,7 @@ jobs:
         with:
           python-version: '3.12.1'
 
+      # Install TA-Lib from source + ldconfig, if you need that
       - name: Install TA-Lib system library (from source)
         run: |
           sudo apt-get update
@@ -29,14 +30,14 @@ jobs:
           ./configure --prefix=/usr
           make
           sudo make install
-          sudo ldconfig    # important for the ta-lib C library
+          sudo ldconfig
 
-      # 1) Upgrade pip, setuptools, wheel to ensure the "build_meta" backend is available
-      - name: Upgrade build tools
+      # 1) Upgrade the build tools (pip, setuptools, wheel)
+      - name: Upgrade pip, setuptools, wheel
         run: |
           python -m pip install --upgrade pip setuptools wheel
 
-      # 2) Now install your Python requirements (including ta-lib)
+      # 2) Now install all the usual dependencies
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
