@@ -17,12 +17,18 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'  # or whichever version you need
+          python-version: '3.9'  # Or whichever Python version you need
 
-      - name: Install TA-Lib system library
+      - name: Install TA-Lib system library (from source)
         run: |
           sudo apt-get update
-          sudo apt-get install -y ta-lib
+          sudo apt-get install -y build-essential wget
+          wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
+          tar -xzvf ta-lib-0.4.0-src.tar.gz
+          cd ta-lib
+          ./configure --prefix=/usr
+          make
+          sudo make install
 
       - name: Install dependencies
         run: |
