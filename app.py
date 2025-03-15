@@ -19,18 +19,25 @@ from tasks.daily_scan_tasks import daily_scan_wrapper
 def create_app(testing=False):
     """
     Application factory that configures and returns the Flask app.
+    
+    Args:
+        testing (bool): Whether the app is running in testing mode.
+    
+    Returns:
+        Flask app instance.
     """
     load_dotenv()
-    app = Flask(__name__)
-    app.config['TESTING'] = testing
-
-    # Use different CORS origins based on whether we are testing or not.
+    # When testing, use wildcard origins to avoid issues when no Origin header is set.
     if testing:
-        # During tests, use a wildcard to avoid CORS issues when Origin is missing.
-        CORS(app, resources={r"/api/*": {"origins": "*"}})
+        frontend_origin = "*"
     else:
-        frontend_origin = os.getenv('front_end_client_website')
-        CORS(app, resources={r"/api/*": {"origins": frontend_origin}})
+        frontend_origin = os.getenv('front_end_client_website') or "*"
+    
+    app = Flask(__name__)
+    app.config["TESTING"] = testing
+
+    # Set up CORS using the appropriate origin(s)
+    CORS(app, resources={r"/api/*": {"origins": frontend_origin}})
     
     # Register the blueprint modules
     app.register_blueprint(summary_blueprint)
@@ -54,12 +61,12 @@ def create_scheduler():
 # Only run the server if this file is executed directly (development mode).
 if __name__ == "__main__":
     app = create_app()
-
-    # Optionally run the job once on startup for dev
+    
+    # Optionally run the job once on startup for development
     daily_scan_wrapper()
-
+    
     # Start the scheduler
     create_scheduler()
-
+    
     # Run the app
     app.run(debug=True)
