@@ -1,7 +1,7 @@
 #requirements.txt
 
 Flask==3.1.0
-Flask-Cors==5.0.0
+Flask-Cors==5.0.1
 python-dotenv==1.0.1
 APScheduler==3.11.0
 pandas==2.2.3
@@ -10,7 +10,7 @@ psycopg2==2.9.10
 yfinance==0.2.54
 finnhub-python==2.4.22
 requests==2.32.3
-ta-lib==0.6.1
+ta-lib==0.6.3
 alpha_vantage==3.0.0
-pytest==7.4.0
+pytest==8.3.5
 
