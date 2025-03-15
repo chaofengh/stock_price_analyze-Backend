@@ -21,4 +21,3 @@ def get_connection():
     
     return psycopg2.connect(db_url, sslmode="require")  # Render often requires sslmode
 
-get_connection()
