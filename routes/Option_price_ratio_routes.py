@@ -70,7 +70,6 @@ def get_option_price_ratio():
 
                 # Filter for out-of-the-money put options (strike < stock_price)
                 otm_puts = option_data[option_data['strike'] < stock_price]
-                print(otm_puts[['strike', 'lastPrice', 'bid', 'ask']])
 
                 if otm_puts.empty:
                     results.append({
