@@ -15,11 +15,11 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v3
 
-      # 2) Set up Python 3.11
+      # 2) Set up Python 3.12
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11.0'
+          python-version: '3.12.0'
 
       # 3) Install system prerequisites via Homebrew on macOS
       - name: Install system prerequisites
