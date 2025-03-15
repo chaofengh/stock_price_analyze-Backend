@@ -1,6 +1,9 @@
 # tests/conftest.py
 import pytest
 from app import create_app
+import os
+os.environ["DATABASE_URL"] = "postgresql://dummy:dummy@localhost/dummy"
+
 
 @pytest.fixture(scope="session")
 def app():
