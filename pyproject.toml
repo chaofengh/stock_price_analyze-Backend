@@ -1,0 +1,54 @@
+[build-system]
+# Requires setuptools 61+ to read metadata from pyproject.toml
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock_price_analyze_backend"
+version = "0.1.0"
+description = "A backend for stock price analysis"
+authors = [
+  { name = "Your Name", email = "you@example.com" }
+]
+readme = "README.md"
+requires-python = ">=3.8"
+
+# List your dependencies here:
+dependencies = [
+  "pandas>=1.0",
+  "numpy>=1.20",
+  "requests>=2.25",
+  "sqlalchemy>=1.4",
+  # e.g. "fastapi>=0.95",
+  # Add others if needed
+]
+
+# Optional: extra dependencies for testing/development
+[project.optional-dependencies]
+test = [
+  "pytest>=7.0",
+  "pytest-cov>=4.0",
+  # Add other test libs here
+]
+
+# Tell setuptools how to find your package directories
+[tool.setuptools.packages.find]
+where = "."
+include = [
+  "analysis*",
+  "database*",
+  "routes*",
+  "tasks*",
+  "utils*"
+]
+exclude = [
+  "tests*",
+  "env*",
+  "__pycache__",
+  ".github*",
+  ".pytest_cache*"
+]
+
+# Also treat the top-level "app.py" as a Python module named "app"
+[tool.setuptools]
+py-modules = ["app"]
