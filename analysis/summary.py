@@ -1,11 +1,19 @@
 # summary.py
+
 import pandas as pd
 from .data_preparation import prepare_stock_data, get_trading_period
 from .event_detection_analysis import get_touch_and_hug_events, compute_bounces_and_pullbacks
 from .metrics_calculation import compute_aggregates
 from .additional_metrics import compute_additional_metrics, compute_avg_hug_length
 from .chart_builder import build_chart_data
-from .fundamentals import get_fundamentals, get_peers, get_peers_fundamentals, compute_peer_metric_avg, compare_metric
+from .fundamentals import (
+    get_fundamentals, 
+    get_peers, 
+    get_peers_fundamentals, 
+    compute_peer_metric_avg, 
+    compare_metric
+)
+from .data_fetcher import fetch_stock_data  # <--- Make sure we import fetch_stock_data
 
 def get_summary(symbol: str) -> dict:
     # 1. Fetch and prepare data
@@ -38,6 +46,7 @@ def get_summary(symbol: str) -> dict:
     # 7. Fundamentals and peer analysis
     fundamentals = get_fundamentals(symbol)
     peers = get_peers(symbol)
+    print('this is values of peers:', peers)
     peers_fundamentals = get_peers_fundamentals(peers)
     avg_peer_trailingPE = compute_peer_metric_avg(peers_fundamentals, "trailingPE")
     avg_peer_forwardPE = compute_peer_metric_avg(peers_fundamentals, "forwardPE")
@@ -51,6 +60,35 @@ def get_summary(symbol: str) -> dict:
     PGI_compare        = compare_metric(fundamentals.get("PGI"),        avg_peer_PGI,        "PGI")
     beta_compare       = compare_metric(fundamentals.get("beta"),       avg_peer_beta,       "Beta")
     
+    # 7a. Fetch the latest peer data for 1 day, 15-minute intervals
+    #     and calculate each peer's last close and percentage change for the day.
+    peer_info = {}
+    if peers:
+        peer_data = fetch_stock_data(peers, period="1d", interval="15m")
+        for peer_symbol in peers:
+            df_peer = peer_data.get(peer_symbol, pd.DataFrame())
+            if not df_peer.empty:
+                # Get the first and last close of the day
+                first_close = df_peer.iloc[0]['close']
+                last_close = df_peer.iloc[-1]['close']
+                
+                # Calculate the percentage change if we have valid data
+                if first_close is not None and first_close != 0:
+                    pct_change = ((last_close - first_close) / first_close) * 100
+                else:
+                    pct_change = None
+                
+                peer_info[peer_symbol] = {
+                    'latest_price': last_close,
+                    'percentage_change': pct_change
+                }
+            else:
+                # No data for this peer
+                peer_info[peer_symbol] = {
+                    'latest_price': None,
+                    'percentage_change': None
+                }
+
     # 8. Fetch income statement data
     try:
         from .data_fetcher import fetch_income_statement  # import here if not used elsewhere
@@ -123,6 +161,9 @@ def get_summary(symbol: str) -> dict:
         },
 
         'income_statement': income_statement,
+
+        # Include the new peer info with latest price and daily percentage change:
+        'peer_latest_data': peer_info
     }
 
     return summary
