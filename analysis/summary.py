@@ -13,7 +13,7 @@ from .fundamentals import (
     compute_peer_metric_avg, 
     compare_metric
 )
-from .data_fetcher import fetch_stock_data,fetch_income_statement  
+from .data_fetcher import fetch_stock_data, fetch_financials  
 
 def get_summary(symbol: str) -> dict:
     # 1. Fetch and prepare data
@@ -88,10 +88,10 @@ def get_summary(symbol: str) -> dict:
                     'percentage_change': None
                 }
 
-    # 8. Fetch income statement data
+    # 8. Fetch financial statement data (only income statement in this case)
     try:
-
-        income_statement = fetch_income_statement(symbol)
+        financials = fetch_financials(symbol, statements="income_statement")
+        income_statement = financials.get("income_statement", {})
     except Exception:
         income_statement = {}
     

@@ -1,3 +1,4 @@
+#tickers_routes.py
 from flask import Blueprint, jsonify, request
 from database.ticker_repository import get_all_tickers, insert_tickers, remove_ticker
 from analysis.data_preparation import fetch_stock_data

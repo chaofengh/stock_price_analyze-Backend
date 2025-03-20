@@ -2,8 +2,22 @@ from flask import Blueprint, request, jsonify
 from analysis.data_fetcher import fetch_stock_option_data  
 from database.ticker_repository import get_all_tickers
 import datetime
+import math
 
 option_price_ratio_blueprint = Blueprint('option_price_ratio', __name__)
+
+def convert_nan(obj):
+    """
+    Recursively replace any NaN values in a structure with None.
+    """
+    if isinstance(obj, float) and math.isnan(obj):
+        return None
+    elif isinstance(obj, dict):
+        return {k: convert_nan(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_nan(item) for item in obj]
+    else:
+        return obj
 
 @option_price_ratio_blueprint.route('/api/option-price-ratio', methods=['GET'])
 def get_option_price_ratio():
@@ -85,7 +99,6 @@ def get_option_price_ratio():
                 best_price = best_row.get('lastPrice')
                 best_ratio = best_price / stock_price if stock_price else None
 
-
                 # 4) Add the result for this ticker
                 results.append({
                     "ticker": ticker,
@@ -104,8 +117,9 @@ def get_option_price_ratio():
                     "error": str(ticker_error)
                 })
 
-        # 5) Return a list of results, one entry per ticker
-        return jsonify(results), 200
+        # Convert any NaN values in the results to None
+        safe_results = convert_nan(results)
+        return jsonify(safe_results), 200
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500

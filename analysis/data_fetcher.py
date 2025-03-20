@@ -286,40 +286,77 @@ def fetch_peers(symbol: str) -> list:
     except Exception:
         return []
     
-def fetch_income_statement(symbol: str) -> dict:
+def fetch_financials(symbol: str, statements=None) -> dict:
     """
-    Fetches the income statement data for the given symbol using the Alpha Vantage API.
-    Returns a dictionary containing:
-      - the last three annualReports
-      - the last eight quarterlyReports
+    Fetches specified financial statement data for the given symbol using the Alpha Vantage API.
+
+    Parameters:
+        symbol (str): The stock ticker symbol.
+        statements (str or list of str, optional): Specifies which financial statement(s) to fetch.
+            Valid options are "income_statement", "balance_sheet", "cash_flow".
+            If None, all three types will be fetched.
+            You can also pass a single string (e.g., "income_statement") or a list of strings.
+    
+    Returns:
+        dict: A dictionary where each key is one of the requested statement types. 
+              Each value contains the filtered data with the last three annualReports 
+              and the last eight quarterlyReports.
+    
+    Raises:
+        ValueError: If the API key is missing or if an invalid statement type is provided.
+        Exception: For any errors during the HTTP request.
     """
     if not alpha_vantage_api_key:
         raise ValueError("Missing 'alpha_vantage_api_key' in environment")
     
-    url = f"https://www.alphavantage.co/query?function=INCOME_STATEMENT&symbol={symbol}&apikey={alpha_vantage_api_key}"
-    response = requests.get(url)
+    # Mapping from our statement keys to the Alpha Vantage API function names.
+    valid_types = {
+        "income_statement": "INCOME_STATEMENT",
+        "balance_sheet": "BALANCE_SHEET",
+        "cash_flow": "CASH_FLOW"
+    }
     
-    if response.status_code != 200:
-        raise Exception(f"Error fetching income statement data: {response.status_code}")
+    # If no specific statement(s) are requested, fetch all types.
+    if statements is None:
+        requested_types = list(valid_types.keys())
+    else:
+        # Allow a single string to be passed.
+        if isinstance(statements, str):
+            requested_types = [statements]
+        elif isinstance(statements, list):
+            requested_types = statements
+        else:
+            raise ValueError("`statements` must be a string or a list of strings")
     
-    data = response.json()
+    # Validate requested statement types.
+    for statement in requested_types:
+        if statement not in valid_types:
+            raise ValueError(f"Invalid statement type: {statement}. Valid options are: {list(valid_types.keys())}")
     
-    # Filter and sort annualReports to keep only the last three entries.
-    if "annualReports" in data:
-        data["annualReports"] = sorted(
-            data["annualReports"],
-            key=lambda x: x.get("fiscalDateEnding", ""),
-            reverse=True
-        )[:3]
-    
-    # Filter and sort quarterlyReports to keep only the last eight entries.
-    if "quarterlyReports" in data:
-        data["quarterlyReports"] = sorted(
-            data["quarterlyReports"],
-            key=lambda x: x.get("fiscalDateEnding", ""),
-            reverse=True
-        )[:8]
-    
-    return data
-
-
+    financials = {}
+    for statement in requested_types:
+        function_name = valid_types[statement]
+        url = f"https://www.alphavantage.co/query?function={function_name}&symbol={symbol}&apikey={alpha_vantage_api_key}"
+        response = requests.get(url)
+        if response.status_code != 200:
+            raise Exception(f"Error fetching {statement} data: {response.status_code}")
+        data = response.json()
+        
+        # Filter and sort annualReports to keep only the last three entries.
+        if "annualReports" in data:
+            data["annualReports"] = sorted(
+                data["annualReports"],
+                key=lambda x: x.get("fiscalDateEnding", ""),
+                reverse=True
+            )[:3]
+        
+        # Filter and sort quarterlyReports to keep only the last eight entries.
+        if "quarterlyReports" in data:
+            data["quarterlyReports"] = sorted(
+                data["quarterlyReports"],
+                key=lambda x: x.get("fiscalDateEnding", ""),
+                reverse=True
+            )[:8]
+        
+        financials[statement] = data
+    return financials
