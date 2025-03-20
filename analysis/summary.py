@@ -13,7 +13,7 @@ from .fundamentals import (
     compute_peer_metric_avg, 
     compare_metric
 )
-from .data_fetcher import fetch_stock_data  # <--- Make sure we import fetch_stock_data
+from .data_fetcher import fetch_stock_data,fetch_income_statement  
 
 def get_summary(symbol: str) -> dict:
     # 1. Fetch and prepare data
@@ -46,7 +46,6 @@ def get_summary(symbol: str) -> dict:
     # 7. Fundamentals and peer analysis
     fundamentals = get_fundamentals(symbol)
     peers = get_peers(symbol)
-    print('this is values of peers:', peers)
     peers_fundamentals = get_peers_fundamentals(peers)
     avg_peer_trailingPE = compute_peer_metric_avg(peers_fundamentals, "trailingPE")
     avg_peer_forwardPE = compute_peer_metric_avg(peers_fundamentals, "forwardPE")
@@ -91,7 +90,7 @@ def get_summary(symbol: str) -> dict:
 
     # 8. Fetch income statement data
     try:
-        from .data_fetcher import fetch_income_statement  # import here if not used elsewhere
+
         income_statement = fetch_income_statement(symbol)
     except Exception:
         income_statement = {}

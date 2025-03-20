@@ -289,7 +289,9 @@ def fetch_peers(symbol: str) -> list:
 def fetch_income_statement(symbol: str) -> dict:
     """
     Fetches the income statement data for the given symbol using the Alpha Vantage API.
-    Returns a dictionary containing the symbol and only the last three annual reports.
+    Returns a dictionary containing:
+      - the last three annualReports
+      - the last eight quarterlyReports
     """
     if not alpha_vantage_api_key:
         raise ValueError("Missing 'alpha_vantage_api_key' in environment")
@@ -302,10 +304,7 @@ def fetch_income_statement(symbol: str) -> dict:
     
     data = response.json()
     
-    # Remove the quarterlyReports key if it exists.
-    data.pop("quarterlyReports", None)
-    
-    # Filter and sort annualReports to keep only the last three years.
+    # Filter and sort annualReports to keep only the last three entries.
     if "annualReports" in data:
         data["annualReports"] = sorted(
             data["annualReports"],
@@ -313,5 +312,14 @@ def fetch_income_statement(symbol: str) -> dict:
             reverse=True
         )[:3]
     
+    # Filter and sort quarterlyReports to keep only the last eight entries.
+    if "quarterlyReports" in data:
+        data["quarterlyReports"] = sorted(
+            data["quarterlyReports"],
+            key=lambda x: x.get("fiscalDateEnding", ""),
+            reverse=True
+        )[:8]
+    
     return data
+
 
