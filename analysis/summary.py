@@ -102,7 +102,7 @@ def get_summary(symbol: str) -> dict:
         'trading_days': n,
         'initial_price': initial_price,
         'final_price': final_price,
-        'price_change_in_dollars': final_price - initial_price,
+        'price_change_in_dollars': final_price - initial_price or 0,
         'percentage_change': add_metrics['percentage_change'],
         'total_volume': add_metrics['total_volume'],
         'average_volume': add_metrics['average_volume'],
