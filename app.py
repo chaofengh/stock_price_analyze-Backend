@@ -13,7 +13,8 @@ from routes.summary_routes import summary_blueprint
 from routes.alerts_routes import alerts_blueprint
 from routes.tickers_routes import tickers_blueprint
 from routes.Option_price_ratio_routes import option_price_ratio_blueprint
-from routes.financials_routes import financials_blueprint  # <-- NEW IMPORT
+from routes.financials_routes import financials_blueprint  
+from routes.user_routes import user_blueprint
 
 # Import your scheduled job wrapper
 from tasks.daily_scan_tasks import daily_scan_wrapper
@@ -39,7 +40,8 @@ def create_app(testing=False):
     app.register_blueprint(alerts_blueprint)
     app.register_blueprint(tickers_blueprint)
     app.register_blueprint(option_price_ratio_blueprint)
-    app.register_blueprint(financials_blueprint)  # <-- NEW BLUEPRINT REGISTRATION
+    app.register_blueprint(financials_blueprint)
+    app.register_blueprint(user_blueprint, url_prefix="/api")
 
     return app
 
