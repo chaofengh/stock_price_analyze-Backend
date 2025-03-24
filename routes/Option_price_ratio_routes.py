@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from analysis.data_fetcher import fetch_stock_option_data  
+from analysis.data_fetcher import fetch_stock_option_data, fetch_stock_fundamentals  # include fundamentals
 from database.ticker_repository import get_all_tickers
 import datetime
 import math
@@ -23,7 +23,7 @@ def convert_nan(obj):
 def get_option_price_ratio():
     """
     GET endpoint to fetch the out-of-the-money put option with the highest price
-    for all tickers in the database.
+    for all tickers in the database, and include the trailing PE for each stock.
     
     Expiration date is automatically set to:
       - The upcoming Friday if today is Monday-Thursday.
@@ -37,6 +37,7 @@ def get_option_price_ratio():
         - best_put_option (details about the best OTM put)
         - best_put_price
         - best_put_ratio (best_put_price / stock_price)
+        - trailingPE (from the stock fundamentals)
         - error (only if something failed for that ticker)
     """
     try:
@@ -99,14 +100,22 @@ def get_option_price_ratio():
                 best_price = best_row.get('lastPrice')
                 best_ratio = best_price / stock_price if stock_price else None
 
-                # 4) Add the result for this ticker
+                # Fetch trailing PE using the fundamentals function
+                try:
+                    fundamentals = fetch_stock_fundamentals(ticker)
+                    trailing_pe = fundamentals.get("trailingPE")
+                except Exception as fe:
+                    trailing_pe = None
+
+                # 4) Add the result for this ticker, including trailingPE
                 results.append({
                     "ticker": ticker,
                     "expiration": expiration,
                     "stock_price": stock_price,
                     "best_put_option": best_row,
                     "best_put_price": best_price,
-                    "best_put_ratio": best_ratio
+                    "best_put_ratio": best_ratio,
+                    "trailingPE": trailing_pe
                 })
 
             except Exception as ticker_error:
