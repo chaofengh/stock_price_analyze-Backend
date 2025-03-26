@@ -1,7 +1,7 @@
+#user_routes.py
 import os
 import re
 import smtplib
-import requests
 import jwt
 from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify
