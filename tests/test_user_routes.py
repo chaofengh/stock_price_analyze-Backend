@@ -1,12 +1,10 @@
 # tests/test_user_routes.py
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime
 import datetime as dt
-
 from app import create_app
 
-# --- Fake implementations for database operations ---
-
+# --- Fake implementations for database functions ---
 def fake_create_user(email, username, password):
     """
     Simulate creating a user in the database.
@@ -14,25 +12,25 @@ def fake_create_user(email, username, password):
     """
     return (123, email, username, dt.datetime.utcnow())
 
-def fake_find_user_by_email_or_username(email_or_username):
+def fake_find_user_by_email_or_username(identifier):
     """
     Simulate looking up a user by email or username.
-    For the login test, if the provided value matches the registered email/username,
-    return a user tuple with the known password.
+    For the login test, if the provided identifier matches the registered email/username,
+    return a user tuple.
+    Tuple structure: (id, email, username, password_hash, reset_token, reset_token_expires)
     """
-    if email_or_username in ["loginuser@example.com", "loginuser"]:
-        # Tuple: (id, email, username, password_hash, reset_token, reset_token_expires)
+    if identifier in ["loginuser@example.com", "loginuser"]:
         return (123, "loginuser@example.com", "loginuser", "LoginPassword123", None, None)
     return None
 
 def fake_find_user_by_email(email):
     """
     Simulate finding a user by email.
-    For registration and forgot password, return a valid tuple if the email matches.
+    For registration and forgot password, return a tuple if the email matches one of our test cases.
     """
     if email in ["forgotuser@example.com", "newuser@example.com"]:
-        # For registration, reset token info may be None.
-        return (123, email, "dummy", "SomeHashedPassword", None, None)
+        # Return a tuple with dummy values (reset token info can be None)
+        return (123, email, "dummy_username", "SomeHashedPassword", None, None)
     return None
 
 def fake_set_reset_token(user_id):
@@ -44,13 +42,12 @@ def fake_set_reset_token(user_id):
 
 def fake_verify_password(plain, hashed):
     """
-    For login purposes, simply check that the plain password equals the expected value.
-    (This works because in fake_create_user we don’t actually hash the password.)
+    For login, simply check that the plain password equals the expected password.
+    (In our fake, we assume that for the login test the password should be "LoginPassword123".)
     """
-    # For our login test, we expect the password to be "LoginPassword123"
     return plain == "LoginPassword123"
 
-# --- Patching the database functions ---
+# --- Fixture to patch the user_repository functions ---
 @pytest.fixture(autouse=True)
 def patch_user_repository(monkeypatch):
     from database import user_repository
@@ -68,13 +65,13 @@ def client():
     with app.test_client() as client:
         yield client
 
-# --- Patch send_reset_email so no real email is sent ---
+# --- Patch send_reset_email to avoid sending a real email ---
 @pytest.fixture(autouse=True)
 def patch_send_email(monkeypatch):
     from routes import user_routes
     monkeypatch.setattr(user_routes, "send_reset_email", lambda to_email, reset_token: None)
 
-# --- Tests for endpoints ---
+# --- Endpoint Tests ---
 
 def test_register(client):
     payload = {
@@ -101,7 +98,7 @@ def test_register_invalid_email(client):
         "form_time": 10
     }
     response = client.post("/api/register", json=payload)
-    # Should return a 400 for invalid email format.
+    # Should return a 400 for an invalid email format.
     assert response.status_code == 400
 
 def test_login(client):
