@@ -4,14 +4,13 @@ from unittest.mock import patch
 import pytest
 
 # Import the function under test.
-# Adjust the import path as needed for your project.
 from routes.user_routes import set_reset_token
 
 def test_get_latest_alerts_no_data(client):
     """
     Test the /api/alerts/latest endpoint when there is no scan result.
     """
-    # Patch where 'latest_scan_result' actually lives
+    # Patch where 'latest_scan_result' actually lives.
     with patch("routes.alerts_routes.daily_scan_tasks.latest_scan_result", None):
         response = client.get("/api/alerts/latest")
         assert response.status_code == 200
@@ -45,7 +44,7 @@ def test_alerts_stream(client):
         "alerts": []
     }):
         response = client.get("/api/alerts/stream")
-        # SSE responses should return a 200 and the `text/event-stream` MIME type
+        # SSE responses should return a 200 and the `text/event-stream` MIME type.
         assert response.status_code == 200
         assert response.mimetype == "text/event-stream"
 
@@ -55,7 +54,8 @@ def mock_conn():
     from database.connection import get_connection
     return get_connection()
 
-def test_set_reset_token(mock_conn):
+@patch('routes.user_routes.secrets.token_urlsafe', return_value="RandomGeneratedToken123")
+def test_set_reset_token(mock_token, mock_conn):
     """
     Test that setting a reset token works with a mocked DB.
     """
@@ -67,14 +67,15 @@ def test_set_reset_token(mock_conn):
     # 2) For set_reset_token (token generation, e.g., via RETURNING clause)
     # 3) For find_user_by_email (to verify the new token and expiration)
     mock_cursor.fetchone.side_effect = [
-        # Simulated create_user result
+        # Simulated create_user result.
         (123, "resetuser@example.com", "resetuser", datetime.utcnow()),
-        # Simulated result of setting the reset token
+        # Simulated result of setting the reset token.
         ("RandomGeneratedToken123",),
-        # Simulated find_user_by_email result with token and expiration updated
-        (123, "resetuser@example.com", "resetuser", "some_hashed_password", "RandomGeneratedToken123", datetime.utcnow() + timedelta(seconds=3600))
+        # Simulated find_user_by_email result with token and expiration updated.
+        (123, "resetuser@example.com", "resetuser", "some_hashed_password",
+         "RandomGeneratedToken123", datetime.utcnow() + timedelta(seconds=3600))
     ]
     
-    # Call the function under test which should use the mocked DB connection.
+    # Call the function under test which should use the patched token generator.
     token = set_reset_token("resetuser@example.com")
     assert token == "RandomGeneratedToken123"
