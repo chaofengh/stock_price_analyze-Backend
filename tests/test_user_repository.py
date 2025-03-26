@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import patch
-from datetime import datetime
+from datetime import datetime,timedelta
 from database import user_repository
 
 @pytest.fixture
@@ -68,7 +68,8 @@ def test_set_reset_token(mock_conn):
         # in Python, you might not rely on fetchone here; adjust as needed.
         ("RandomGeneratedToken123",), 
         # find_user_by_email => returns (id, email, username, password, reset_token, reset_token_expires)
-        (123, "resetuser@example.com", "resetuser", "some_hashed_password", "RandomGeneratedToken123", datetime.utcnow() + 3600)
+        (123, "resetuser@example.com", "resetuser", "some_hashed_password", "RandomGeneratedToken123", datetime.utcnow() + timedelta(seconds=3600)
+)
     ]
 
     email = "resetuser@example.com"
