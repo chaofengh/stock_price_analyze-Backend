@@ -1,23 +1,11 @@
 import json
+from datetime import datetime, timedelta
 from unittest.mock import patch
-from flask import Flask
 import pytest
 
-# Assuming your Flask app + alerts_blueprint is defined somewhere else, e.g. "app.py" or "routes/alerts_routes.py".
-# and you have a "client" fixture that provides a Flask test client.
-# These imports may vary depending on how your project is structured.
-# Example:
-# from routes.alerts_routes import alerts_blueprint
-# from app import create_app
-
-@pytest.fixture
-def client():
-    # Example fixture to create a test client – adapt to your setup
-    app = Flask(__name__)
-    # app.register_blueprint(alerts_blueprint)  # If needed
-    app.testing = True
-    with app.test_client() as test_client:
-        yield test_client
+# Import the function under test.
+# Adjust the import path as needed for your project.
+from routes.user_routes import set_reset_token
 
 def test_get_latest_alerts_no_data(client):
     """
@@ -60,5 +48,33 @@ def test_alerts_stream(client):
         # SSE responses should return a 200 and the `text/event-stream` MIME type
         assert response.status_code == 200
         assert response.mimetype == "text/event-stream"
-        # Optionally, you could try reading the streamed data, but
-        # SSE is trickier to test fully in a synchronous environment.
+
+# Define a fixture to retrieve the mocked DB connection.
+@pytest.fixture
+def mock_conn():
+    from database.connection import get_connection
+    return get_connection()
+
+def test_set_reset_token(mock_conn):
+    """
+    Test that setting a reset token works with a mocked DB.
+    """
+    # Access the mocked cursor from the connection.
+    mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
+
+    # Set up the side effects for fetchone():
+    # 1) For create_user (user exists)
+    # 2) For set_reset_token (token generation, e.g., via RETURNING clause)
+    # 3) For find_user_by_email (to verify the new token and expiration)
+    mock_cursor.fetchone.side_effect = [
+        # Simulated create_user result
+        (123, "resetuser@example.com", "resetuser", datetime.utcnow()),
+        # Simulated result of setting the reset token
+        ("RandomGeneratedToken123",),
+        # Simulated find_user_by_email result with token and expiration updated
+        (123, "resetuser@example.com", "resetuser", "some_hashed_password", "RandomGeneratedToken123", datetime.utcnow() + timedelta(seconds=3600))
+    ]
+    
+    # Call the function under test which should use the mocked DB connection.
+    token = set_reset_token("resetuser@example.com")
+    assert token == "RandomGeneratedToken123"
