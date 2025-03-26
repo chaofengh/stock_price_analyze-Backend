@@ -8,8 +8,8 @@ def mock_conn():
     """
     Fixture to patch out the actual DB connection used by user_repository.
     """
-    with patch("database.user_repository.conn") as mocked_conn:
-        mock_cursor = mocked_conn.cursor.return_value.__enter__.return_value
+    with patch("database.user_repository.get_connection") as mocked_get_connection:
+        mocked_conn = mocked_get_connection.return_value
         # You can set up default side effects if needed across multiple tests:
         # mock_cursor.fetchone.side_effect = [...]
         yield mocked_conn
