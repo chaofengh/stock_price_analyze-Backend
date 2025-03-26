@@ -1,4 +1,3 @@
-# routes/user_routes.py
 import os
 import re
 import smtplib
@@ -37,21 +36,7 @@ def sanitize_username(username: str) -> str:
     """
     return re.sub(r'[^a-zA-Z0-9_]', '', username)
 
-def verify_captcha(captcha_token: str) -> bool:
-    """
-    Verify the reCAPTCHA token using Google's reCAPTCHA API.
-    Expects a valid RECAPTCHA_SECRET in your environment variables.
-    """
-    recaptcha_secret = os.getenv("RECAPTCHA_SECRET")
-    if not recaptcha_secret:
-        return False
-    payload = {"secret": recaptcha_secret, "response": captcha_token}
-    try:
-        response = requests.post("https://www.google.com/recaptcha/api/siteverify", data=payload)
-        result = response.json()
-        return result.get("success", False)
-    except Exception:
-        return False
+# Note: The verify_captcha function has been removed because we no longer use reCAPTCHA.
 
 @user_blueprint.route("/register", methods=["POST"])
 def register():
@@ -62,23 +47,31 @@ def register():
       "email": "...",
       "username": "...",
       "password": "...",
-      "captcha_token": "..."
+      "honey_trap": "",
+      "form_time": <time_in_seconds>
     }
     """
     data = request.get_json() or {}
     email = (data.get("email") or "").strip()
     username = sanitize_username((data.get("username") or "").strip())
     password = (data.get("password") or "").strip()
-    captcha_token = (data.get("captcha_token") or "").strip()
+    honey_trap = (data.get("honey_trap") or "").strip()
+    form_time = data.get("form_time")
 
-    if not email or not username or not password or not captcha_token:
-        return jsonify({"error": "email, username, password, and captcha_token are required"}), 400
+    if not email or not username or not password or honey_trap is None or form_time is None:
+        return jsonify({"error": "email, username, password, honey_trap, and form_time are required"}), 400
 
-    # Validate CAPTCHA
-    if not verify_captcha(captcha_token):
-        return jsonify({"error": "CAPTCHA validation failed"}), 400
+    if honey_trap != "":
+        return jsonify({"error": "Bot detected"}), 400
 
-    # Basic server-side checks
+    try:
+        form_time = float(form_time)
+    except Exception:
+        return jsonify({"error": "Invalid form time"}), 400
+
+    if form_time < 5:
+        return jsonify({"error": "Form submitted too quickly"}), 400
+
     if len(username) < 3:
         return jsonify({"error": "Username must be at least 3 characters"}), 400
     if len(password) < 8:
@@ -111,21 +104,30 @@ def login():
     {
       "email_or_username": "...",
       "password": "...",
-      "captcha_token": "..."
+      "honey_trap": "",
+      "form_time": <time_in_seconds>
     }
     On successful login, a JWT token is returned.
     """
     data = request.get_json() or {}
     email_or_username = (data.get("email_or_username") or "").strip()
     password = (data.get("password") or "").strip()
-    captcha_token = (data.get("captcha_token") or "").strip()
+    honey_trap = (data.get("honey_trap") or "").strip()
+    form_time = data.get("form_time")
 
-    if not email_or_username or not password or not captcha_token:
-        return jsonify({"error": "email_or_username, password, and captcha_token are required"}), 400
+    if not email_or_username or not password or honey_trap is None or form_time is None:
+        return jsonify({"error": "email_or_username, password, honey_trap, and form_time are required"}), 400
 
-    # Validate CAPTCHA
-    if not verify_captcha(captcha_token):
-        return jsonify({"error": "CAPTCHA validation failed"}), 400
+    if honey_trap != "":
+        return jsonify({"error": "Bot detected"}), 400
+
+    try:
+        form_time = float(form_time)
+    except Exception:
+        return jsonify({"error": "Invalid form time"}), 400
+
+    if form_time < 5:
+        return jsonify({"error": "Form submitted too quickly"}), 400
 
     user_row = find_user_by_email_or_username(email_or_username)
     if not user_row:
@@ -136,7 +138,6 @@ def login():
     if not verify_password(password, password_hash):
         return jsonify({"error": "Invalid credentials"}), 401
 
-    # Generate JWT token
     payload = {
         "user_id": user_id,
         "exp": datetime.utcnow() + timedelta(hours=JWT_EXP_DELTA_HOURS)
@@ -160,25 +161,34 @@ def forgot_password():
     Expects JSON:
     {
       "email": "...",
-      "captcha_token": "..."
+      "honey_trap": "",
+      "form_time": <time_in_seconds>
     }
     """
     data = request.get_json() or {}
     email = (data.get("email") or "").strip()
-    captcha_token = (data.get("captcha_token") or "").strip()
+    honey_trap = (data.get("honey_trap") or "").strip()
+    form_time = data.get("form_time")
 
-    if not email or not captcha_token:
-        return jsonify({"error": "Email and captcha_token are required"}), 400
+    if not email or honey_trap is None or form_time is None:
+        return jsonify({"error": "Email, honey_trap, and form_time are required"}), 400
 
-    if not verify_captcha(captcha_token):
-        return jsonify({"error": "CAPTCHA validation failed"}), 400
+    if honey_trap != "":
+        return jsonify({"error": "Bot detected"}), 400
+
+    try:
+        form_time = float(form_time)
+    except Exception:
+        return jsonify({"error": "Invalid form time"}), 400
+
+    if form_time < 5:
+        return jsonify({"error": "Form submitted too quickly"}), 400
 
     user_row = find_user_by_email(email)
     if not user_row:
         return jsonify({"message": "If that email exists, a reset link was sent"}), 200
 
     user_id, user_email, user_name, _, _, _ = user_row
-
     new_token = set_reset_token(user_id)
 
     try:
