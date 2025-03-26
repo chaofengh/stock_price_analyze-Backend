@@ -1,6 +1,7 @@
+# test/test_user_repository.py
 import pytest
 from unittest.mock import patch
-from datetime import datetime,timedelta
+from datetime import datetime, timedelta
 from database import user_repository
 
 @pytest.fixture
@@ -10,8 +11,6 @@ def mock_conn():
     """
     with patch("database.user_repository.get_connection") as mocked_get_connection:
         mocked_conn = mocked_get_connection.return_value
-        # You can set up default side effects if needed across multiple tests:
-        # mock_cursor.fetchone.side_effect = [...]
         yield mocked_conn
 
 def test_hash_and_verify_password():
@@ -32,7 +31,7 @@ def test_create_and_find_user(mock_conn):
     mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
     mock_cursor.fetchone.side_effect = [
         (1, "testuser@example.com", "testuser", datetime.utcnow()),  # create_user result
-        (1, "testuser@example.com", "testuser", datetime.utcnow())   # find_user_by_email_or_username
+        (1, "testuser@example.com", "testuser", datetime.utcnow())     # find_user_by_email_or_username
     ]
 
     email = "testuser@example.com"
@@ -56,20 +55,14 @@ def test_set_reset_token(mock_conn):
     """
     mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
 
-    # We'll have 3 calls to fetchone():
-    # 1) for create_user
-    # 2) for set_reset_token (if it does a SELECT after the update or uses RETURNING)
-    # 3) for find_user_by_email
+    # Set up three fetchone() responses:
+    # 1) For create_user result.
+    # 2) For set_reset_token (simulate token returning from an UPDATE/SELECT).
+    # 3) For find_user_by_email: return the user row with the updated token and expiration.
     mock_cursor.fetchone.side_effect = [
-        # create_user result
         (123, "resetuser@example.com", "resetuser", datetime.utcnow()), 
-        # set_reset_token might do an UPDATE with a RETURNING token or a SELECT, 
-        # if you code it that way. If your code only returns the token as a new random string
-        # in Python, you might not rely on fetchone here; adjust as needed.
         ("RandomGeneratedToken123",), 
-        # find_user_by_email => returns (id, email, username, password, reset_token, reset_token_expires)
-        (123, "resetuser@example.com", "resetuser", "some_hashed_password", "RandomGeneratedToken123", datetime.utcnow() + timedelta(seconds=3600)
-)
+        (123, "resetuser@example.com", "resetuser", "some_hashed_password", "RandomGeneratedToken123", datetime.utcnow() + timedelta(seconds=3600))
     ]
 
     email = "resetuser@example.com"
@@ -78,13 +71,16 @@ def test_set_reset_token(mock_conn):
     user = user_repository.create_user(email, username, password)
     user_id = user[0]
 
-    token = user_repository.set_reset_token(user_id)
+    # Patch secrets.token_urlsafe to always return the fixed token.
+    with patch('secrets.token_urlsafe', return_value="RandomGeneratedToken123"):
+        token = user_repository.set_reset_token(user_id)
+    
     assert token is not None
     assert token == "RandomGeneratedToken123"
 
     found = user_repository.find_user_by_email(email)
     assert found is not None
-    # Suppose found[4] = reset_token, found[5] = reset_token_expires
+    # found[4] = reset_token, found[5] = reset_token_expires
     assert found[4] == "RandomGeneratedToken123"
     assert isinstance(found[5], datetime)
     assert found[5] > datetime.utcnow()
