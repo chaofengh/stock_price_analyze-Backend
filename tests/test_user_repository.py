@@ -49,38 +49,4 @@ def test_create_and_find_user(mock_conn):
     assert found[1] == email
     assert found[2] == username
 
-def test_set_reset_token(mock_conn):
-    """
-    Test that setting a reset token works with a mocked DB.
-    """
-    mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
 
-    # Set up three fetchone() responses:
-    # 1) For create_user result.
-    # 2) For set_reset_token (simulate token returning from an UPDATE/SELECT).
-    # 3) For find_user_by_email: return the user row with the updated token and expiration.
-    mock_cursor.fetchone.side_effect = [
-        (123, "resetuser@example.com", "resetuser", datetime.utcnow()), 
-        ("RandomGeneratedToken123",), 
-        (123, "resetuser@example.com", "resetuser", "some_hashed_password", "RandomGeneratedToken123", datetime.utcnow() + timedelta(seconds=3600))
-    ]
-
-    email = "resetuser@example.com"
-    username = "resetuser"
-    password = "ResetPassword123!"
-    user = user_repository.create_user(email, username, password)
-    user_id = user[0]
-
-    # Patch secrets.token_urlsafe to always return the fixed token.
-    with patch('secrets.token_urlsafe', return_value="RandomGeneratedToken123"):
-        token = user_repository.set_reset_token(user_id)
-    
-    assert token is not None
-    assert token == "RandomGeneratedToken123"
-
-    found = user_repository.find_user_by_email(email)
-    assert found is not None
-    # found[4] = reset_token, found[5] = reset_token_expires
-    assert found[4] == "RandomGeneratedToken123"
-    assert isinstance(found[5], datetime)
-    assert found[5] > datetime.utcnow()

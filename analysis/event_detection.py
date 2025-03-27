@@ -2,29 +2,73 @@
 import pandas as pd
 
 # Touch detection remains largely the same
-def detect_touches(data: pd.DataFrame) -> list:
+def process_bollinger_touches(data, mode='alert'):
     """
-    Identifies single-day touches where the price touches the Bollinger Bands.
+    Process Bollinger Band touches in two modes.
+    
+    For mode 'alert':
+      - Expects data as a dict {symbol: DataFrame}.
+      - Checks the latest row for each symbol.
+      - Returns a list of alert dictionaries including:
+            "symbol", "close_price", "bb_upper", "bb_lower", "touched_side", "recent_closes".
+    
+    For mode 'historical':
+      - Expects data as a DataFrame for a single ticker.
+      - Iterates over all rows and returns a list of touch events with:
+            "date", "index", "band" (either 'upper' or 'lower'), and "price".
     """
-    touches = []
-    n = len(data)
-    for i in range(n):
-        row = data.loc[i]
-        if row['high'] >= row['BB_upper']:
-            touches.append({
-                'date':  row['date'],
-                'index': i,
-                'band':  'upper',
-                'price': float(row['close'])
-            })
-        if row['low'] <= row['BB_lower']:
-            touches.append({
-                'date':  row['date'],
-                'index': i,
-                'band':  'lower',
-                'price': float(row['close'])
-            })
-    return touches
+    results = []
+    
+    if mode == 'alert':
+        # data is a dict of {symbol: DataFrame}
+        for symbol, df in data.items():
+            if df.empty:
+                continue
+            last_row = df.iloc[-1]
+            required_fields = ['close', 'BB_upper', 'BB_lower', 'high', 'low']
+            if any(last_row[field] is None for field in required_fields):
+                continue
+
+            touched_side = None
+            if last_row['high'] >= last_row['BB_upper']:
+                touched_side = "Upper"
+            elif last_row['low'] <= last_row['BB_lower']:
+                touched_side = "Lower"
+            
+            if touched_side:
+                results.append({
+                    "symbol": symbol,
+                    "close_price": float(last_row['close']),
+                    "bb_upper": float(last_row['BB_upper']),
+                    "bb_lower": float(last_row['BB_lower']),
+                    "touched_side": touched_side,
+                    "recent_closes": df['close'].tail(7).tolist()
+                })
+                
+    elif mode == 'historical':
+        # data is a DataFrame for a single ticker
+        n = len(data)
+        for i in range(n):
+            row = data.iloc[i]
+            required_fields = ['date', 'close', 'BB_upper', 'BB_lower', 'high', 'low']
+            if any(row[field] is None for field in required_fields):
+                continue
+            if row['high'] >= row['BB_upper']:
+                results.append({
+                    "date": row['date'],
+                    "index": i,
+                    "band": "upper",
+                    "price": float(row['close'])
+                })
+            if row['low'] <= row['BB_lower']:
+                results.append({
+                    "date": row['date'],
+                    "index": i,
+                    "band": "lower",
+                    "price": float(row['close'])
+                })
+    return results
+
 
 def detect_hug_events(data: pd.DataFrame, touches: list, threshold: float = 1.0):
     """

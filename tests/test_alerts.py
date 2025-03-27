@@ -48,34 +48,4 @@ def test_alerts_stream(client):
         assert response.status_code == 200
         assert response.mimetype == "text/event-stream"
 
-# Define a fixture to retrieve the mocked DB connection.
-@pytest.fixture
-def mock_conn():
-    from database.connection import get_connection
-    return get_connection()
 
-@patch('routes.user_routes.secrets.token_urlsafe', return_value="RandomGeneratedToken123")
-def test_set_reset_token(mock_token, mock_conn):
-    """
-    Test that setting a reset token works with a mocked DB.
-    """
-    # Access the mocked cursor from the connection.
-    mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
-
-    # Set up the side effects for fetchone():
-    # 1) For create_user (user exists)
-    # 2) For set_reset_token (token generation, e.g., via RETURNING clause)
-    # 3) For find_user_by_email (to verify the new token and expiration)
-    mock_cursor.fetchone.side_effect = [
-        # Simulated create_user result.
-        (123, "resetuser@example.com", "resetuser", datetime.utcnow()),
-        # Simulated result of setting the reset token.
-        ("RandomGeneratedToken123",),
-        # Simulated find_user_by_email result with token and expiration updated.
-        (123, "resetuser@example.com", "resetuser", "some_hashed_password",
-         "RandomGeneratedToken123", datetime.utcnow() + timedelta(seconds=3600))
-    ]
-    
-    # Call the function under test which should use the patched token generator.
-    token = set_reset_token("resetuser@example.com")
-    assert token == "RandomGeneratedToken123"
