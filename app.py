@@ -19,6 +19,7 @@ from routes.user_routes import user_blueprint
 # Import your scheduled job wrapper
 from tasks.daily_scan_tasks import daily_scan_wrapper
 
+
 def create_app(testing=False):
     """
     Application factory that configures and returns the Flask app.
