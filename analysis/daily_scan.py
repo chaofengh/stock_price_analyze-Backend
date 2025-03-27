@@ -1,5 +1,4 @@
-#daily_scan.py
-from datetime import datetime
+from datetime import datetime, timezone
 from .data_preparation import prepare_stock_data
 from database.ticker_repository import get_all_tickers
 from .event_detection import process_bollinger_touches
@@ -10,7 +9,8 @@ def daily_scan():
       - timestamp (str)
       - alerts (list of dict)
     """
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # Now using a timezone-aware datetime in UTC.
+    timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     
     # Fetch the ticker symbols from the DB
     tickers = get_all_tickers()

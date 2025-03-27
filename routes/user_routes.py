@@ -1,9 +1,8 @@
-#user_routes.py
 import os
 import re
 import smtplib
 import jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from flask import Blueprint, request, jsonify
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -35,8 +34,6 @@ def sanitize_username(username: str) -> str:
     Removes any character that's not alphanumeric or underscore.
     """
     return re.sub(r'[^a-zA-Z0-9_]', '', username)
-
-# Note: The verify_captcha function has been removed because we no longer use reCAPTCHA.
 
 @user_blueprint.route("/register", methods=["POST"])
 def register():
@@ -140,7 +137,7 @@ def login():
 
     payload = {
         "user_id": user_id,
-        "exp": datetime.utcnow() + timedelta(hours=JWT_EXP_DELTA_HOURS)
+        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXP_DELTA_HOURS)
     }
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 

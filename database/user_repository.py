@@ -1,6 +1,5 @@
-# database/user_repository.py
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from passlib.context import CryptContext
 from .connection import get_connection
 
@@ -90,7 +89,7 @@ def set_reset_token(user_id: int):
     Returns the new reset token.
     """
     token = secrets.token_urlsafe(32)
-    expires = datetime.utcnow() + timedelta(hours=1)
+    expires = datetime.now(timezone.utc) + timedelta(hours=1)
 
     conn = get_connection()
     try:

@@ -1,7 +1,6 @@
-# test/test_user_repository.py
 import pytest
 from unittest.mock import patch
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from database import user_repository
 
 @pytest.fixture
@@ -30,8 +29,8 @@ def test_create_and_find_user(mock_conn):
     # 2) after find_user_by_email_or_username
     mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
     mock_cursor.fetchone.side_effect = [
-        (1, "testuser@example.com", "testuser", datetime.utcnow()),  # create_user result
-        (1, "testuser@example.com", "testuser", datetime.utcnow())     # find_user_by_email_or_username
+        (1, "testuser@example.com", "testuser", datetime.now(timezone.utc)),  # create_user result
+        (1, "testuser@example.com", "testuser", datetime.now(timezone.utc))     # find_user_by_email_or_username
     ]
 
     email = "testuser@example.com"
@@ -48,5 +47,3 @@ def test_create_and_find_user(mock_conn):
     assert found is not None
     assert found[1] == email
     assert found[2] == username
-
-
