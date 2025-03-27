@@ -1,7 +1,7 @@
 # tests/test_event_detection.py
 
 import pandas as pd
-from analysis.event_detection import detect_touches, detect_hug_events, find_short_term_high, find_short_term_low
+from analysis.event_detection import process_bollinger_touches, detect_hug_events, find_short_term_high, find_short_term_low
 
 def test_detect_touches():
     df = pd.DataFrame({
@@ -12,7 +12,7 @@ def test_detect_touches():
         'BB_upper': [9, 10, 12],
         'BB_lower': [7, 6, 5],
     })
-    touches = detect_touches(df)
+    touches = process_bollinger_touches(df,mode='historical')
     # We expect:
     # day 1: high(10) >= BB_upper(9)? => yes, so touches upper
     # day 1: low(5) <= BB_lower(7)? => yes, so touches lower
