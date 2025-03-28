@@ -1,53 +1,177 @@
 # database/ticker_repository.py
 from .connection import get_connection
 
-def get_all_tickers():
+def get_all_tickers(user_id=None):
     """
-    Retrieve all ticker symbols from the 'tickers' table.
-    Returns a list of strings, e.g. ["TSLA", "PLTR", "SQ", ...]
+    If user_id is given, return only tickers in that user's default list.
+    Otherwise, return ALL tickers.
     """
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT symbol FROM tickers;")
+            if user_id is None:
+                cur.execute("SELECT symbol FROM tickers;")
+            else:
+                cur.execute("""
+                    SELECT t.symbol
+                    FROM tickers t
+                    JOIN list_tickers lt ON t.id = lt.ticker_id
+                    JOIN lists l ON lt.list_id = l.id
+                    WHERE l.user_id = %s
+                      AND l.is_default = TRUE;
+                """, (user_id,))
             rows = cur.fetchall()
-            # rows is a list of tuples, e.g. [('TSLA',), ('PLTR',), ...]
             return [row[0] for row in rows]
     finally:
         conn.close()
 
 
-def insert_tickers(ticker_list):
+
+def create_default_user_list(user_id):
     """
-    Inserts each symbol in ticker_list into the 'tickers' table.
-    If a symbol already exists (unique constraint violation),
-    the insert for that symbol is skipped.
+    Creates a default list for a new user and populates it with the predefined tickers.
+    Returns the ID of the new list.
     """
+    # Define the default tickers you want every new user to have.
+    default_tickers = [
+        "TSLA", "PLTR", "NFLX", "AMD", "MU", "CRWD", "SHOP", "DFS", "META", "GS",
+        "NVDA", "PYPL", "SPOT", "ABNB", "CRM", "UBER", "ZM", "TGT", "ADBE", "AMZN",
+        "HD", "PINS", "AAPL", "BBY", "V", "COST", "WMT", "MSFT", "DIS", "SBUX",
+        "JPM", "LULU", "MCD", "T", "QQQ", "XYZ", "TQQQ", "NVDL", "SSO"
+    ]
+    
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            for ticker in ticker_list:
+            # Create the default list for this user.
+            cur.execute("""
+                INSERT INTO lists (user_id, name, is_default)
+                VALUES (%s, %s, TRUE)
+                RETURNING id;
+            """, (user_id, "Default List"))
+            list_id = cur.fetchone()[0]
+            
+            # Ensure each default ticker exists in the tickers table.
+            for ticker in default_tickers:
                 cur.execute("""
                     INSERT INTO tickers (symbol)
                     VALUES (%s)
-                    ON CONFLICT (symbol) DO NOTHING
+                    ON CONFLICT (symbol) DO NOTHING;
                 """, (ticker,))
+            
+            # Get the ticker IDs for the default tickers.
+            cur.execute("""
+                SELECT id, symbol FROM tickers
+                WHERE symbol = ANY(%s);
+            """, (default_tickers,))
+            ticker_rows = cur.fetchall()
+            
+            # Insert each ticker into the list_tickers table for the new list.
+            for ticker_id, symbol in ticker_rows:
+                cur.execute("""
+                    INSERT INTO list_tickers (list_id, ticker_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT DO NOTHING;
+                """, (list_id, ticker_id))
         conn.commit()
+        return list_id
     finally:
         conn.close()
 
-        
-def remove_ticker(ticker):
+# database/ticker_repository.py
+
+def add_ticker_to_user_list(user_id, symbol):
     """
-    Removes the given ticker symbol from the 'tickers' table.
+    1) Ensure 'symbol' exists in the global 'tickers' table (insert if not).
+    2) Insert a row into list_tickers linking the user's default list to that ticker.
     """
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM tickers WHERE symbol = %s", (ticker,))
+            # Ensure ticker exists globally
+            cur.execute("""
+                INSERT INTO tickers (symbol)
+                VALUES (%s)
+                ON CONFLICT (symbol) DO NOTHING
+            """, (symbol,))
+
+            # Get the ticker_id
+            cur.execute("SELECT id FROM tickers WHERE symbol = %s", (symbol,))
+            row = cur.fetchone()
+            if not row:
+                raise Exception(f"Failed to insert/find ticker {symbol}")
+            ticker_id = row[0]
+
+            # Get or create the user's default list (if you always have exactly one)
+            cur.execute("""
+                SELECT id FROM lists
+                WHERE user_id = %s AND is_default = TRUE
+                LIMIT 1
+            """, (user_id,))
+            default_list = cur.fetchone()
+            if not default_list:
+                # If the user doesn't have a default list, create one
+                cur.execute("""
+                    INSERT INTO lists (user_id, name, is_default)
+                    VALUES (%s, %s, TRUE)
+                    RETURNING id
+                """, (user_id, "Default List"))
+                default_list_id = cur.fetchone()[0]
+            else:
+                default_list_id = default_list[0]
+
+            # Link the ticker to the user's default list
+            cur.execute("""
+                INSERT INTO list_tickers (list_id, ticker_id)
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING
+            """, (default_list_id, ticker_id))
+
         conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
     finally:
         conn.close()
 
 
+def remove_ticker_from_user_list(user_id, symbol):
+    """
+    Remove 'symbol' from the user's default list_tickers only.
+    Does NOT remove it from the global tickers table.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            # Find the user's default list
+            cur.execute("""
+                SELECT id FROM lists
+                WHERE user_id = %s AND is_default = TRUE
+                LIMIT 1
+            """, (user_id,))
+            default_list = cur.fetchone()
+            if not default_list:
+                # The user doesn't have a default list or doesn't exist
+                return
+            default_list_id = default_list[0]
 
+            # Find the ticker ID
+            cur.execute("SELECT id FROM tickers WHERE symbol = %s", (symbol,))
+            row = cur.fetchone()
+            if not row:
+                # Ticker not found in global table
+                return
+            ticker_id = row[0]
+
+            # Delete from list_tickers for that user
+            cur.execute("""
+                DELETE FROM list_tickers
+                WHERE list_id = %s AND ticker_id = %s
+            """, (default_list_id, ticker_id))
+
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()

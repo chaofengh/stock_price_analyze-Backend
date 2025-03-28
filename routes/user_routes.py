@@ -14,6 +14,8 @@ from database.user_repository import (
     verify_password,
     set_reset_token
 )
+from database.ticker_repository import create_default_user_list
+
 
 user_blueprint = Blueprint("user_routes", __name__)
 
@@ -77,11 +79,17 @@ def register():
         return jsonify({"error": "Invalid email format"}), 400
 
     try:
+        # 1) Create the new user
         user = create_user(email, username, password)
+        user_id = user[0]
+
+        # 2) Create the default list for this user
+        create_default_user_list(user_id)
+
         return jsonify({
             "message": "User registered successfully",
             "user": {
-                "id": user[0],
+                "id": user_id,
                 "email": user[1],
                 "username": user[2],
                 "created_at": user[3].isoformat() if user[3] else None
@@ -92,6 +100,7 @@ def register():
         if "duplicate key" in err_msg.lower():
             return jsonify({"error": "User with that email or username already exists"}), 400
         return jsonify({"error": err_msg}), 500
+
 
 @user_blueprint.route("/login", methods=["POST"])
 def login():
@@ -123,7 +132,7 @@ def login():
     except Exception:
         return jsonify({"error": "Invalid form time"}), 400
 
-    if form_time < 5:
+    if form_time < 3:
         return jsonify({"error": "Form submitted too quickly"}), 400
 
     user_row = find_user_by_email_or_username(email_or_username)
