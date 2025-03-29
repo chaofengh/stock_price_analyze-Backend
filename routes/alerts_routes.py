@@ -18,11 +18,11 @@ def alerts_stream():
             user_id = None
 
     def event_stream():
-        last_known_timestamp = None
+        last_known_date = None
         while True:
             if daily_scan_tasks.latest_scan_result:
-                current_timestamp = daily_scan_tasks.latest_scan_result["timestamp"]
-                if current_timestamp != last_known_timestamp:
+                current_date = daily_scan_tasks.latest_scan_result["timestamp"].split(" ")[0]
+                if current_date != last_known_date:
                     # Start with the global scan result.
                     result = daily_scan_tasks.latest_scan_result.copy()
                     
@@ -38,8 +38,8 @@ def alerts_stream():
 
                     data_str = json.dumps(result)
                     yield f"data: {data_str}\n\n"
-                    last_known_timestamp = current_timestamp
-            time.sleep(1800)  # Sleep for 30 minutes between checks.
+                    last_known_date = current_date
+            time.sleep(3600)  # Sleep for 1 hour between checks.
     return Response(event_stream(), mimetype='text/event-stream')
 
 
