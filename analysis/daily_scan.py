@@ -1,3 +1,4 @@
+#daily_scan.py
 from datetime import datetime, timezone
 from .data_preparation import prepare_stock_data
 from database.ticker_repository import get_all_tickers
