@@ -15,6 +15,8 @@ from routes.tickers_routes import tickers_blueprint
 from routes.Option_price_ratio_routes import option_price_ratio_blueprint
 from routes.financials_routes import financials_blueprint  
 from routes.user_routes import user_blueprint
+from routes.orb_routes import orb_blueprint
+
 
 # Import your scheduled job wrapper
 from tasks.daily_scan_tasks import daily_scan_wrapper
