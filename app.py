@@ -45,6 +45,7 @@ def create_app(testing=False):
     app.register_blueprint(option_price_ratio_blueprint)
     app.register_blueprint(financials_blueprint)
     app.register_blueprint(user_blueprint, url_prefix="/api")
+    app.register_blueprint(orb_blueprint)
 
     return app
 
