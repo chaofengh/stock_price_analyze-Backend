@@ -200,6 +200,7 @@ def backtest_opening_range_breakout(
 # ---------------------------
 # Running Multiple Test Scenarios
 # ---------------------------
+# ...
 def run_opening_range_breakout_tests(ticker, days=30):
     results = []
     df = fetch_intraday_data(ticker, days=days, interval="15m")
@@ -216,18 +217,22 @@ def run_opening_range_breakout_tests(ticker, days=30):
         for use_volume in volume_options:
             for stop_loss in stop_loss_options:
                 for time_exit in time_exit_options:
-                    filters = []
-                    if use_volume:
-                        filters.append("Volume Filter")
-                    if stop_loss is not None:
-                        filters.append("Stop-Loss")
-                    if time_exit is not None:
-                        filters.append(f"Time Exit ({time_exit}min)")
-                    if not filters:
-                        filters.append("No Filters")
-                    filter_desc = " + ".join(filters)
-                    scenario_name = f"OR {or_minutes}min, {filter_desc}"
+                    # Build a short scenario name, e.g. "OR 30min"
+                    scenario_name = f"OR {or_minutes}min"
                     
+                    # Build a separate string for the filters, e.g. "Volume Filter + Stop-Loss + Time Exit (120min)"
+                    filters_list = []
+                    if use_volume:
+                        filters_list.append("Volume Filter")
+                    if stop_loss is not None:
+                        filters_list.append("Stop-Loss")
+                    if time_exit is not None:
+                        filters_list.append(f"Time Exit ({time_exit}min)")
+                    if not filters_list:
+                        filters_list.append("No Filters")
+                    filter_desc = " + ".join(filters_list)
+
+                    # Run the backtest
                     trades_df = backtest_opening_range_breakout(
                         df,
                         open_range_minutes=or_minutes,
@@ -237,30 +242,35 @@ def run_opening_range_breakout_tests(ticker, days=30):
                         trade_entry_window=("09:30", "12:00")
                     )
                     
+                    # Compute metrics
                     metrics = compute_metrics(trades_df)
                     daily_trades = trades_df.to_dict(orient="records")
                     net_pnl = trades_df["pnl"].sum() if not trades_df.empty else 0
 
-                    
                     scenario_result = {
-                        "scenario_name": scenario_name,
+                        "scenario_name": scenario_name,  # short
+                        "filters": filter_desc,          # secondary line
                         "open_range_minutes": or_minutes,
                         "use_volume_filter": use_volume,
                         "stop_loss": stop_loss,
                         "time_exit_minutes": time_exit,
                         "win_rate": metrics["win_rate"],
+                        "win_rate_formatted": f"{round(metrics['win_rate'] * 100, 1)}%",
                         "profit_factor": metrics["profit_factor"],
+                        "profit_factor_formatted": f"{metrics['profit_factor']:.2f}" if metrics["profit_factor"] is not None else "N/A",
                         "sharpe_ratio": metrics["sharpe_ratio"],
+                        "sharpe_ratio_formatted": f"{metrics['sharpe_ratio']:.2f}" if metrics["sharpe_ratio"] is not None else "N/A",
                         "max_drawdown": metrics["max_drawdown"],
+                        "max_drawdown_formatted": f"{metrics['max_drawdown']:.2f}" if metrics["max_drawdown"] is not None else "N/A",
                         "num_trades": metrics["num_trades"],
                         "daily_trades": daily_trades,
-                        "net_pnl": round(net_pnl, 2)
+                        "net_pnl": round(net_pnl, 2),
+                        "net_pnl_formatted": f"${round(net_pnl, 2):,}"
                     }
                     results.append(scenario_result)
     
-    # Process intraday data for the full period.
+    # Prepare intraday data (unchanged)
     intraday_df = df.reset_index()
-    # Ensure the date column is correctly named. If not, rename the first column.
     if 'date' not in intraday_df.columns:
         intraday_df = intraday_df.rename(columns={intraday_df.columns[0]: 'date'})
     intraday_df = intraday_df.rename(columns={
