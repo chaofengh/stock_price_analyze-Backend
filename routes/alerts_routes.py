@@ -21,6 +21,7 @@ def alerts_stream():
         last_known_date = None
         while True:
             if daily_scan_tasks.latest_scan_result:
+                print(daily_scan_tasks.latest_scan_result)
                 current_date = daily_scan_tasks.latest_scan_result["timestamp"].split(" ")[0]
                 if current_date != last_known_date:
                     # Start with the global scan result.
@@ -42,10 +43,3 @@ def alerts_stream():
             time.sleep(3600)  # Sleep for 1 hour between checks.
     return Response(event_stream(), mimetype='text/event-stream')
 
-
-@alerts_blueprint.route('/api/alerts/latest', methods=['GET'])
-def get_latest_alerts():
-    if daily_scan_tasks.latest_scan_result:
-        return jsonify(daily_scan_tasks.latest_scan_result)
-    else:
-        return jsonify({"timestamp": None, "alerts": []}), 200
