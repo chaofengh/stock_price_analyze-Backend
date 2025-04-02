@@ -20,7 +20,7 @@ if not logger.handlers:
 # ---------------------------
 # Data Fetching and Preprocessing
 # ---------------------------
-def fetch_intraday_data(ticker, days=30, interval="15m", target_timezone="US/Eastern"):
+def fetch_intraday_data(ticker, days=30, interval="5m", target_timezone="US/Eastern"):
     try:
         df = yf.download(ticker, period=f"{days}d", interval=interval, auto_adjust=True, progress=False)
         if df.empty:
