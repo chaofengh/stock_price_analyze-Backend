@@ -270,7 +270,7 @@ def run_opening_range_breakout_tests(ticker, days=30):
     automatically handle DST for each date.
     """
     results = []
-    df = fetch_intraday_data(ticker, days=days, interval="15m")
+    df = fetch_intraday_data(ticker, days=days, interval="5m")
     if df.empty:
         logger.warning(f"No intraday data available for {ticker}.")
         return {"scenarios": results, "intraday_data": []}
