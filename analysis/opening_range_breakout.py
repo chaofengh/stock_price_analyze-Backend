@@ -18,11 +18,37 @@ if not logger.handlers:
     logger.addHandler(ch)
 
 # ---------------------------
-# Data Fetching and Preprocessing
+# Helper: Detect if a given date is in US/Eastern DST
 # ---------------------------
-def fetch_intraday_data(ticker, days=30, interval="5m", target_timezone="US/Eastern"):
+def is_us_eastern_dst(date_val):
+    """
+    Given date_val as a datetime.date, returns True if that date is in DST in US/Eastern.
+    Uses midnight UTC -> local conversion to check.
+    """
+    # Create midnight UTC of that date
+    dt_utc = datetime.datetime(date_val.year, date_val.month, date_val.day, tzinfo=pytz.UTC)
+    # Convert to US/Eastern
+    dt_eastern = dt_utc.astimezone(pytz.timezone("US/Eastern"))
+    # Check if it is in DST
+    return bool(dt_eastern.dst())
+
+# ---------------------------
+# Data Fetching in UTC (no local filtering)
+# ---------------------------
+def fetch_intraday_data(ticker, days=30, interval="5m"):
+    """
+    Fetch raw intraday data in UTC, without filtering by time.
+    We'll filter for market hours later inside the backtest,
+    automatically handling DST on a per‐date basis.
+    """
     try:
-        df = yf.download(ticker, period=f"{days}d", interval=interval, auto_adjust=True, progress=False)
+        df = yf.download(
+            ticker,
+            period=f"{days}d",
+            interval=interval,
+            auto_adjust=True,
+            progress=False
+        )
         if df.empty:
             logger.warning(f"Empty dataset fetched for {ticker}.")
             return pd.DataFrame()
@@ -31,24 +57,17 @@ def fetch_intraday_data(ticker, days=30, interval="5m", target_timezone="US/East
         logger.error(f"Error fetching data for {ticker}: {e}")
         return pd.DataFrame()
 
+    # Convert MultiIndex columns if necessary
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    
+
+    # Ensure we have a DatetimeIndex in UTC
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index)
-    
-    if df.index.tzinfo is None:
-        df.index = df.index.tz_localize("UTC")
-    try:
-        df.index = df.index.tz_convert(target_timezone)
-    except Exception as e:
-        logger.error(f"Timezone conversion error for {ticker}: {e}")
-        return pd.DataFrame()
 
-    try:
-        df = df.between_time("09:30", "16:00")
-    except Exception as e:
-        logger.error(f"Error filtering market hours for {ticker}: {e}")
+    # Localize to UTC if naive
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("UTC")
 
     return df
 
@@ -82,20 +101,25 @@ def compute_metrics(trades):
     }
 
 # ---------------------------
-# Backtesting the Opening Range Breakout Strategy
+# Backtesting Opening Range Breakout with DST Handling
 # ---------------------------
 def backtest_opening_range_breakout(
     df,
     open_range_minutes=30,
     use_volume_filter=False,
     stop_loss=None,
-    time_exit_minutes=None,
-    trade_entry_window=("09:30", "12:00")
+    time_exit_minutes=None
 ):
+    """
+    Backtest logic in UTC. For each date, detect DST vs. Standard time.
+    Then choose the correct "full session" hours and "entry window" hours
+    in UTC accordingly.
+    """
     if df.empty:
         logger.warning("Empty DataFrame received for backtesting.")
         return pd.DataFrame()
-    
+
+    # Copy data and add a separate 'date' column (in UTC)
     df = df.copy()
     df["date"] = df.index.date
     grouped = df.groupby("date")
@@ -104,16 +128,35 @@ def backtest_opening_range_breakout(
     for date_val, day_data in grouped:
         day_data = day_data.sort_index()
 
-        full_day_data = day_data.between_time("09:30", "16:00")
+        # Is this date in DST? => pick the correct UTC session times
+        if is_us_eastern_dst(date_val):
+            # DST: 9:30-16:00 ET -> 13:30-20:00 UTC
+            session_start_utc = "13:30"
+            session_end_utc   = "20:00"
+            # If you only allow entries up to 12:00 ET => 16:00 UTC
+            entry_window_start_utc = "13:30"
+            entry_window_end_utc   = "16:00"
+        else:
+            # Standard Time: 9:30-16:00 ET -> 14:30-21:00 UTC
+            session_start_utc = "14:30"
+            session_end_utc   = "21:00"
+            # If you only allow entries up to 12:00 ET => 17:00 UTC
+            entry_window_start_utc = "14:30"
+            entry_window_end_utc   = "17:00"
+
+        # Filter the "full" day in UTC
+        full_day_data = day_data.between_time(session_start_utc, session_end_utc)
         if full_day_data.empty:
-            logger.info(f"Skipping {date_val}: No data for full session.")
+            logger.info(f"Skipping {date_val}: No data in session window {session_start_utc}-{session_end_utc} UTC.")
             continue
 
-        entry_data = full_day_data.between_time(trade_entry_window[0], trade_entry_window[1])
+        # Filter the "entry" data
+        entry_data = full_day_data.between_time(entry_window_start_utc, entry_window_end_utc)
         if entry_data.empty:
-            logger.info(f"Skipping {date_val}: No data in entry window {trade_entry_window[0]}-{trade_entry_window[1]}.")
+            logger.info(f"Skipping {date_val}: No data in entry window {entry_window_start_utc}-{entry_window_end_utc}.")
             continue
 
+        # Determine how many bars we need to form the "opening range"
         try:
             interval_minutes = (entry_data.index[1] - entry_data.index[0]).seconds / 60.0
         except Exception as e:
@@ -122,13 +165,16 @@ def backtest_opening_range_breakout(
 
         bars_for_open_range = max(1, int(open_range_minutes // interval_minutes))
         if bars_for_open_range > len(entry_data):
-            logger.info(f"Skipping {date_val}: insufficient bars for open range, needed {bars_for_open_range}, available {len(entry_data)}.")
+            logger.info(
+                f"Skipping {date_val}: insufficient bars for open range, needed {bars_for_open_range}, "
+                f"available {len(entry_data)}."
+            )
             continue
 
+        # Opening range
         opening_range_data = entry_data.iloc[:bars_for_open_range]
         or_high = opening_range_data["High"].max()
         or_low = opening_range_data["Low"].min()
-
         or_volume = opening_range_data["Volume"].sum()
         day_avg_volume = entry_data["Volume"].mean()
         volume_ok = or_volume > day_avg_volume
@@ -140,8 +186,10 @@ def backtest_opening_range_breakout(
         trade_entry_time = None
         trade_exit_time = None
 
+        # Loop over the full session to see if/when the breakout occurs
         for idx, row in full_day_data.iterrows():
-            if not trade_executed and idx.time() <= datetime.time(12, 0):
+            # Attempt entry up to the end of the entry window (e.g., 16:00 or 17:00 UTC)
+            if not trade_executed and idx.time() <= datetime.time.fromisoformat(entry_window_end_utc):
                 if use_volume_filter and not volume_ok:
                     logger.debug(f"{date_val}: Volume filter not met. Skipping trade.")
                     break
@@ -156,8 +204,10 @@ def backtest_opening_range_breakout(
                     trade_executed = True
                     trade_entry_time = idx
 
+            # If we're in a trade, see if we stop out or time exit
             if trade_executed:
                 current_close = row["Close"]
+                # Check stop loss
                 if stop_loss is not None:
                     if direction == "long" and current_close <= entry_price * (1 - stop_loss):
                         exit_price = entry_price * (1 - stop_loss)
@@ -167,6 +217,8 @@ def backtest_opening_range_breakout(
                         exit_price = entry_price * (1 + stop_loss)
                         trade_exit_time = idx
                         break
+
+                # Check time exit
                 if time_exit_minutes is not None and trade_entry_time is not None:
                     elapsed_minutes = (idx - trade_entry_time).seconds / 60.0
                     if elapsed_minutes >= time_exit_minutes:
@@ -174,10 +226,12 @@ def backtest_opening_range_breakout(
                         trade_exit_time = idx
                         break
 
+        # If a trade was entered but never hit a stop or time exit, exit at session close
         if trade_executed and exit_price is None:
             exit_price = full_day_data.iloc[-1]["Close"]
             trade_exit_time = full_day_data.index[-1]
 
+        # Record the trade if it happened
         if trade_executed:
             pnl = (exit_price - entry_price) if direction == "long" else (entry_price - exit_price)
             trade_record = {
@@ -186,8 +240,8 @@ def backtest_opening_range_breakout(
                 "entry_price": entry_price,
                 "exit_price": exit_price,
                 "pnl": pnl,
-                "entry_time": trade_entry_time.isoformat() if trade_entry_time else None,
-                "exit_time": trade_exit_time.isoformat() if trade_exit_time else None
+                "entry_time": trade_entry_time.astimezone(pytz.UTC).isoformat() if trade_entry_time else None,
+                "exit_time": trade_exit_time.astimezone(pytz.UTC).isoformat() if trade_exit_time else None,
             }
             all_trades.append(trade_record)
 
@@ -200,8 +254,11 @@ def backtest_opening_range_breakout(
 # ---------------------------
 # Running Multiple Test Scenarios
 # ---------------------------
-# ...
 def run_opening_range_breakout_tests(ticker, days=30):
+    """
+    Run various scenarios, each with different parameters, and
+    automatically handle DST for each date.
+    """
     results = []
     df = fetch_intraday_data(ticker, days=days, interval="15m")
     if df.empty:
@@ -217,10 +274,7 @@ def run_opening_range_breakout_tests(ticker, days=30):
         for use_volume in volume_options:
             for stop_loss in stop_loss_options:
                 for time_exit in time_exit_options:
-                    # Build a short scenario name, e.g. "OR 30min"
                     scenario_name = f"OR {or_minutes}min"
-                    
-                    # Build a separate string for the filters, e.g. "Volume Filter + Stop-Loss + Time Exit (120min)"
                     filters_list = []
                     if use_volume:
                         filters_list.append("Volume Filter")
@@ -232,24 +286,21 @@ def run_opening_range_breakout_tests(ticker, days=30):
                         filters_list.append("No Filters")
                     filter_desc = " + ".join(filters_list)
 
-                    # Run the backtest
                     trades_df = backtest_opening_range_breakout(
                         df,
                         open_range_minutes=or_minutes,
                         use_volume_filter=use_volume,
                         stop_loss=stop_loss,
-                        time_exit_minutes=time_exit,
-                        trade_entry_window=("09:30", "12:00")
+                        time_exit_minutes=time_exit
                     )
-                    
-                    # Compute metrics
+
                     metrics = compute_metrics(trades_df)
                     daily_trades = trades_df.to_dict(orient="records")
                     net_pnl = trades_df["pnl"].sum() if not trades_df.empty else 0
 
                     scenario_result = {
-                        "scenario_name": scenario_name,  # short
-                        "filters": filter_desc,          # secondary line
+                        "scenario_name": scenario_name,
+                        "filters": filter_desc,
                         "open_range_minutes": or_minutes,
                         "use_volume_filter": use_volume,
                         "stop_loss": stop_loss,
@@ -257,30 +308,47 @@ def run_opening_range_breakout_tests(ticker, days=30):
                         "win_rate": metrics["win_rate"],
                         "win_rate_formatted": f"{round(metrics['win_rate'] * 100, 1)}%",
                         "profit_factor": metrics["profit_factor"],
-                        "profit_factor_formatted": f"{metrics['profit_factor']:.2f}" if metrics["profit_factor"] is not None else "N/A",
+                        "profit_factor_formatted": (
+                            f"{metrics['profit_factor']:.2f}" if metrics["profit_factor"] is not None else "N/A"
+                        ),
                         "sharpe_ratio": metrics["sharpe_ratio"],
-                        "sharpe_ratio_formatted": f"{metrics['sharpe_ratio']:.2f}" if metrics["sharpe_ratio"] is not None else "N/A",
+                        "sharpe_ratio_formatted": (
+                            f"{metrics['sharpe_ratio']:.2f}" if metrics["sharpe_ratio"] is not None else "N/A"
+                        ),
                         "max_drawdown": metrics["max_drawdown"],
-                        "max_drawdown_formatted": f"{metrics['max_drawdown']:.2f}" if metrics["max_drawdown"] is not None else "N/A",
+                        "max_drawdown_formatted": (
+                            f"{metrics['max_drawdown']:.2f}" if metrics["max_drawdown"] is not None else "N/A"
+                        ),
                         "num_trades": metrics["num_trades"],
                         "daily_trades": daily_trades,
                         "net_pnl": round(net_pnl, 2),
                         "net_pnl_formatted": f"${round(net_pnl, 2):,}"
                     }
                     results.append(scenario_result)
-    
-    # Prepare intraday data (unchanged)
+
+    # Prepare intraday data in UTC
     intraday_df = df.reset_index()
-    if 'date' not in intraday_df.columns:
-        intraday_df = intraday_df.rename(columns={intraday_df.columns[0]: 'date'})
-    intraday_df = intraday_df.rename(columns={
-        'Open': 'open',
-        'High': 'high',
-        'Low': 'low',
-        'Close': 'close',
-        'Volume': 'volume'
-    })
-    intraday_df['date'] = intraday_df['date'].apply(lambda d: d.isoformat())
-    intraday_data = intraday_df.to_dict(orient='records')
-    
-    return {"scenarios": results, "intraday_data": intraday_data}
+    # Rename the first column (original index) to "timestamp"
+    old_index_col = intraday_df.columns[0]
+    intraday_df.rename(columns={old_index_col: "timestamp"}, inplace=True)
+    # Keep the datetime as a string with timezone offset (e.g., "2025-03-30 13:30:00+00:00")
+    intraday_df["date"] = intraday_df["timestamp"].astype(str)
+
+    # Rename OHLCV columns for consistency
+    intraday_df.rename(
+        columns={
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume"
+        },
+        inplace=True
+    )
+
+    intraday_data = intraday_df.to_dict(orient="records")
+
+    return {
+        "scenarios": results,
+        "intraday_data": intraday_data
+    }
