@@ -2,6 +2,7 @@
 
 import os
 import atexit
+import pytz
 
 from flask import Flask
 from flask_cors import CORS
@@ -17,10 +18,11 @@ from routes.financials_routes import financials_blueprint
 from routes.user_routes import user_blueprint
 from routes.orb_routes import orb_blueprint
 
-
-# Import your scheduled job wrapper
+# Import your scheduled job wrapper for daily scans
 from tasks.daily_scan_tasks import daily_scan_wrapper
 
+# Import the orb scheduler functions
+from tasks.orb_scheduler import start_breakout_scanner
 
 def create_app(testing=False):
     """
@@ -51,10 +53,24 @@ def create_app(testing=False):
 
 def create_scheduler():
     """
-    Create and start the BackgroundScheduler for running daily_scan.
+    Create and start the BackgroundScheduler for running daily scans and the orb breakout scanner.
     """
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(daily_scan_wrapper, 'cron', day_of_week='mon-fri', hour=16, minute=30)
+    eastern = pytz.timezone('US/Eastern')
+    scheduler = BackgroundScheduler(timezone=eastern)
+
+    # Existing daily scan job (example scheduling)
+    scheduler.add_job(
+        daily_scan_wrapper, 
+        'cron', 
+        day_of_week='mon-fri', 
+        hour=16, 
+        minute=2,
+        timezone=eastern
+    )
+
+    # Start the breakout scanner job (from 10:00 AM to 12:00 PM Eastern, every 2 minutes)
+    start_breakout_scanner(scheduler)
+
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown(wait=False))
     return scheduler

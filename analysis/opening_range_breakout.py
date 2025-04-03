@@ -1,3 +1,5 @@
+#opening_range_breakout.py
+
 import os
 import logging
 import datetime
@@ -264,13 +266,13 @@ def backtest_opening_range_breakout(
 # ---------------------------
 # Running Multiple Test Scenarios
 # ---------------------------
-def run_opening_range_breakout_tests(ticker, days=30):
+def run_opening_range_breakout_tests(ticker, days=30, interval="5m"):
     """
     Run various scenarios, each with different parameters, and
     automatically handle DST for each date.
     """
     results = []
-    df = fetch_intraday_data(ticker, days=days, interval="5m")
+    df = fetch_intraday_data(ticker, days=days, interval=interval)
     if df.empty:
         logger.warning(f"No intraday data available for {ticker}.")
         return {"scenarios": results, "intraday_data": []}
