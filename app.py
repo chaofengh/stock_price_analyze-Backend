@@ -69,7 +69,6 @@ def create_scheduler():
     )
 
     # Start the breakout scanner job (from 10:00 AM to 12:00 PM Eastern, every 2 minutes)
-    start_breakout_scanner(scheduler)
 
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown(wait=False))
