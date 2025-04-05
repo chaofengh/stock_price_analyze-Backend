@@ -82,6 +82,16 @@ def fetch_intraday_data(ticker, days=30, interval="5m"):
 # Performance Metrics Calculation
 # ---------------------------
 def compute_metrics(trades):
+    # Handle the case where no trades have been recorded.
+    if trades.empty or "pnl" not in trades.columns:
+        return {
+            "win_rate": 0.0,
+            "profit_factor": None,
+            "sharpe_ratio": None,
+            "max_drawdown": None,
+            "num_trades": 0
+        }
+    
     pnl_series = pd.Series(trades['pnl'])
     wins = pnl_series[pnl_series > 0]
     losses = pnl_series[pnl_series <= 0]
@@ -106,6 +116,7 @@ def compute_metrics(trades):
         "max_drawdown": round(max_drawdown, 2) if max_drawdown == max_drawdown else None,
         "num_trades": len(trades)
     }
+
 
 # ---------------------------
 # Backtesting Opening Range Breakout with DST Handling (UTC-based)
