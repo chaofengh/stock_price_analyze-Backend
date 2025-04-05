@@ -1,7 +1,6 @@
 # tests/test_tickers.py
-import json
 import pandas as pd
-from unittest.mock import patch
+from unittest.mock import patch, call
 
 def test_delete_ticker_missing_field(client):
     """
@@ -16,12 +15,13 @@ def test_delete_ticker_success(client):
     """
     Test successful deletion with a mock removing the ticker from DB.
     """
-    with patch("routes.tickers_routes.remove_ticker") as mock_remove:
-        response = client.delete("/api/tickers", json={"ticker": "TSLA"})
+    # Patch the correct function: remove_ticker_from_user_list
+    with patch("routes.tickers_routes.remove_ticker_from_user_list") as mock_remove:
+        response = client.delete("/api/tickers", json={"user_id": 123, "ticker": "TSLA"})
         assert response.status_code == 200
         data = response.get_json()
         assert data["status"] == "deleted"
-        mock_remove.assert_called_once_with("TSLA")
+        mock_remove.assert_called_once_with(123, "TSLA")
 
 def test_get_tickers_success(client):
     """
@@ -48,20 +48,25 @@ def test_add_ticker_single(client):
     """
     Test adding a single ticker in the request body.
     """
-    with patch("routes.tickers_routes.insert_tickers") as mock_insert:
-        response = client.post("/api/tickers", json={"ticker": "PLTR"})
+    # Patch the correct function: add_ticker_to_user_list
+    with patch("routes.tickers_routes.add_ticker_to_user_list") as mock_add:
+        response = client.post("/api/tickers", json={"user_id": 123, "ticker": "PLTR"})
         assert response.status_code == 200
         data = response.get_json()
         assert data["status"] == "success"
-        mock_insert.assert_called_once_with(["PLTR"])
+        mock_add.assert_called_once_with(123, "PLTR")
 
 def test_add_ticker_multiple(client):
     """
     Test adding multiple tickers in the request body.
     """
-    with patch("routes.tickers_routes.insert_tickers") as mock_insert:
-        response = client.post("/api/tickers", json={"tickers": ["MSFT", "AMZN"]})
+    # Patch the correct function: add_ticker_to_user_list
+    with patch("routes.tickers_routes.add_ticker_to_user_list") as mock_add:
+        response = client.post("/api/tickers", json={"user_id": 123, "tickers": ["MSFT", "AMZN"]})
         assert response.status_code == 200
         data = response.get_json()
         assert data["status"] == "success"
-        mock_insert.assert_called_once_with(["MSFT", "AMZN"])
+        # Expect two calls, one for each ticker
+        expected_calls = [call(123, "MSFT"), call(123, "AMZN")]
+        assert mock_add.call_count == 2
+        mock_add.assert_has_calls(expected_calls, any_order=False)
