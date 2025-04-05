@@ -21,9 +21,6 @@ from routes.orb_routes import orb_blueprint
 # Import your scheduled job wrapper for daily scans
 from tasks.daily_scan_tasks import daily_scan_wrapper
 
-# Import the orb scheduler functions
-from tasks.orb_scheduler import start_breakout_scanner
-
 def create_app(testing=False):
     """
     Application factory that configures and returns the Flask app.
