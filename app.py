@@ -17,6 +17,8 @@ from routes.Option_price_ratio_routes import option_price_ratio_blueprint
 from routes.financials_routes import financials_blueprint  
 from routes.user_routes import user_blueprint
 from routes.orb_routes import orb_blueprint
+from routes.ticker_logo_routes import ticker_logo_blueprint
+
 
 # Import your scheduled job wrapper for daily scans
 from tasks.daily_scan_tasks import daily_scan_wrapper
@@ -45,6 +47,7 @@ def create_app(testing=False):
     app.register_blueprint(financials_blueprint)
     app.register_blueprint(user_blueprint, url_prefix="/api")
     app.register_blueprint(orb_blueprint)
+    app.register_blueprint(ticker_logo_blueprint)
 
     return app
 

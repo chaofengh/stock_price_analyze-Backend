@@ -1,5 +1,7 @@
 # database/ticker_repository.py
 from .connection import get_connection
+import psycopg2
+
 
 def get_all_tickers(user_id=None):
     """
@@ -175,3 +177,56 @@ def remove_ticker_from_user_list(user_id, symbol):
         raise e
     finally:
         conn.close()
+def get_logo_base64_for_symbol(symbol):
+    """
+    Returns the Base64-encoded logo for the given symbol, or None if not set.
+    """
+    query = """
+        SELECT logo_url_base64
+        FROM tickers
+        WHERE symbol = %s
+        LIMIT 1;
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        with conn.cursor() as cur:
+            cur.execute(query, (symbol,))
+            result = cur.fetchone()
+            return result[0] if result else None
+    except Exception as e:
+        print(f"Error fetching logo_url_base64 for symbol {symbol}:", e)
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def update_logo_base64_for_symbol(symbol, logo_base64):
+    """
+    Updates the 'logo_url_base64' column for the given symbol.
+    If the ticker doesn't exist, you could either create it or handle the error.
+    """
+    query = """
+        UPDATE tickers
+        SET logo_url_base64 = %s
+        WHERE symbol = %s
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        with conn.cursor() as cur:
+            cur.execute(query, (logo_base64, symbol))
+            if cur.rowcount == 0:
+                # If no row was updated, symbol might not exist yet
+                # Insert a new record if desired
+                insert_query = """
+                    INSERT INTO tickers (symbol, logo_url_base64)
+                    VALUES (%s, %s)
+                """
+                cur.execute(insert_query, (symbol, logo_base64))
+            conn.commit()
+    except Exception as e:
+        print(f"Error updating logo_url_base64 for symbol {symbol}:", e)
+    finally:
+        if conn:
+            conn.close()
