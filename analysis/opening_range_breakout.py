@@ -227,14 +227,18 @@ def backtest_opening_range_breakout(
 
             # If we're in a trade, see if we stop out or time exit
             if trade_executed:
+
+                # Skip comparing on the same bar as the entry
+                if idx == trade_entry_time:
+                    continue
                 current_close = row["Close"]
                 # Check stop loss
                 if stop_loss is not None:
-                    if direction == "long" and current_close <= entry_price * (1 - stop_loss):
+                    if direction == "long" and row['Low'] <= entry_price * (1 - stop_loss):
                         exit_price = entry_price * (1 - stop_loss)
                         trade_exit_time = idx
                         break
-                    elif direction == "short" and current_close >= entry_price * (1 + stop_loss):
+                    elif direction == "short" and row['High'] >= entry_price * (1 + stop_loss):
                         exit_price = entry_price * (1 + stop_loss)
                         trade_exit_time = idx
                         break
@@ -290,7 +294,7 @@ def run_opening_range_breakout_tests(ticker, days=30, interval="5m"):
 
     or_minutes_list = [30, 45]
     volume_options = [False, True]
-    stop_loss_options = [None, 0.01]
+    stop_loss_options = [None, 0.005]
     time_exit_options = [60, 120]
 
     for or_minutes in or_minutes_list:
