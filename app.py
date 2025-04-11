@@ -56,7 +56,7 @@ def create_scheduler():
     Create and start the BackgroundScheduler for running daily scans and the orb breakout scanner.
     """
     eastern = pytz.timezone('US/Eastern')
-    scheduler = BackgroundScheduler(timezone=eastern)
+    scheduler = BackgroundScheduler()
 
     # Existing daily scan job (example scheduling)
     scheduler.add_job(

@@ -44,7 +44,7 @@ def process_bollinger_touches(data, mode='alert'):
                     'low_price': float(last_row['low']),
                     'high_price': float(last_row['high']),
                     "touched_side": touched_side,
-                    "recent_closes": df['close'].tail(7).tolist()
+                    "recent_closes": df['close'].tail(30).tolist()
                 })
                 
     elif mode == 'historical':
