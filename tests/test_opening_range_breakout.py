@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 # Import the functions you want to test
-from analysis.opening_range_breakout import (
+from stock_price_analyze_backend.analysis.backtest_strategies import (
     is_us_eastern_dst,
     fetch_intraday_data,
     compute_metrics,
