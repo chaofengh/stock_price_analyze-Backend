@@ -1,126 +1,119 @@
-# backtest_strategies/runner.py
-
-import pandas as pd
+"""
+Grid‑search runner – now:
+  • builds ATR + VWAP *once*
+  • pre‑computes OR‑levels for every open‑range length
+  • parallelises the 10 240 parameter pairs across CPU cores
+"""
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing, datetime, pandas as pd
 from .data_fetcher import fetch_intraday_data
-from .orb_strategies import backtest_orb, backtest_reverse_orb
+from .param_grid import generate as param_grid
 from .metrics import compute_metrics
 from .logging_config import logger
+from .orb_strategies import (
+    compute_atr,
+    compute_intraday_vwap,
+    backtest_orb,
+    backtest_reverse_orb,
+)
+from .date_utils import is_us_eastern_dst
 
-def run_backtest(ticker, days=30, interval="5m", strategy="opening_range_breakout"):
+# ---------- helpers ----------
+def _preprocess(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["atr"]   = compute_atr(df)
+    df["vwap"]  = compute_intraday_vwap(df)
+    df["date_utc"] = df.index.strftime("%Y-%m-%d")
+    return df.dropna(subset=["atr", "vwap"])
+
+def _build_or_lookup(df: pd.DataFrame, or_minutes_list) -> dict:
     """
-    High-level backtest function:
-      1) Fetch intraday data.
-      2) Depending on 'strategy', run the appropriate scenario(s).
-      3) Return scenario results plus intraday data for charting.
+    or_levels[m][day] = (or_high, or_low)
     """
-    df = fetch_intraday_data(ticker, days=days, interval=interval)
-    if df.empty:
-        logger.warning(f"No intraday data available for {ticker}.")
-        return {"scenarios": [], "intraday_data": []}
+    lookup = {m: {} for m in or_minutes_list}
+    for day_str, day_df in df.groupby("date_utc"):
+        date_val = datetime.datetime.strptime(day_str, "%Y-%m-%d").date()
+        # dst‑aware session
+        start, end = ("13:30", "20:00") if is_us_eastern_dst(date_val) else ("14:30", "21:00")
+        session = day_df.between_time(start, end)
+        if session.empty:
+            continue
+        bar_min = int((session.index[1] - session.index[0]).seconds / 60)
+        for m in or_minutes_list:
+            or_bars = max(1, m // bar_min)
+            block   = session.iloc[:or_bars]
+            lookup[m][day_str] = (block["High"].max(), block["Low"].min())
+    return lookup
 
-    # Example parameter sweeps for demonstration
-    or_minutes_list = [30, 45]
-    volume_options = [False, True]
-    stop_loss_options = [None, 0.005, 0.01]
-    time_exit_options = [60, 120]
-    limit_same_direction_options = [False, True]
-    max_entry_options = [1, 2]
+# ---------- _run_one kept identical except for new arg ----------
+def _run_one(df, func, or_levels, **p):
+    trades  = func(df=df, or_levels=or_levels, **p)
+    stats   = compute_metrics(trades)
+    net_pnl = trades["pnl"].sum() if not trades.empty else 0
 
-    results = []
-
-    # Select the appropriate backtest function
-    if strategy == "opening_range_breakout":
-        backtest_func = backtest_orb
-    elif strategy == "reverse_opening_range_breakout":
-        backtest_func = backtest_reverse_orb
-    else:
-        raise ValueError(f"Unknown strategy: {strategy}")
-
-    for or_minutes in or_minutes_list:
-        for use_vol in volume_options:
-            for sl in stop_loss_options:
-                for te in time_exit_options:
-                    for limit_dir in limit_same_direction_options:
-                        for max_entries in max_entry_options:
-                            trades = backtest_func(
-                                df=df,
-                                open_range_minutes=or_minutes,
-                                use_volume_filter=use_vol,
-                                stop_loss=sl,
-                                time_exit_minutes=te,
-                                limit_same_direction=limit_dir,
-                                max_entries=max_entries
-                            )
-                            metrics = compute_metrics(trades)
-                            daily_trades = trades.to_dict(orient="records")
-                            net_pnl = trades["pnl"].sum() if not trades.empty else 0
-
-                            filters_list = []
-                            filters_list.append(f"OR={or_minutes}min")
-                            if use_vol:
-                                filters_list.append("VolumeFilter")
-                            if sl is not None:
-                                filters_list.append(f"StopLoss={sl}")
-                            filters_list.append(f"TimeExit={te}m")
-                            if limit_dir:
-                                filters_list.append("ForceOppositeAfterLoss")
-                            filters_list.append(f"MaxEntries={max_entries}")
-
-                            scenario_result = {
-                                "scenario_name": strategy,
-                                "filters": " + ".join(filters_list),
-                                "open_range_minutes": or_minutes,
-                                "use_volume_filter": use_vol,
-                                "stop_loss": sl,
-                                "time_exit_minutes": te,
-                                "limit_same_direction": limit_dir,
-                                "max_entries": max_entries,
-                                "win_rate": metrics["win_rate"],
-                                "win_rate_formatted": f"{round(metrics['win_rate']*100,1)}%",
-                                "profit_factor": metrics["profit_factor"],
-                                "profit_factor_formatted": (
-                                    f"{metrics['profit_factor']:.2f}"
-                                    if metrics["profit_factor"] is not None else "N/A"
-                                ),
-                                "sharpe_ratio": metrics["sharpe_ratio"],
-                                "sharpe_ratio_formatted": (
-                                    f"{metrics['sharpe_ratio']:.2f}"
-                                    if metrics["sharpe_ratio"] is not None else "N/A"
-                                ),
-                                "max_drawdown": metrics["max_drawdown"],
-                                "max_drawdown_formatted": (
-                                    f"{metrics['max_drawdown']:.2f}"
-                                    if metrics["max_drawdown"] is not None else "N/A"
-                                ),
-                                "num_trades": metrics["num_trades"],
-                                "daily_trades": daily_trades,
-                                "net_pnl": round(net_pnl, 2),
-                                "net_pnl_formatted": f"${round(net_pnl, 2):,}"
-                            }
-                            results.append(scenario_result)
-
-    # Prepare intraday data for charting
-    intraday_df = df.reset_index(names="timestamp").rename(columns={"index": "timestamp"})
-    intraday_df["date"] = intraday_df["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    intraday_df.rename(
-        columns={
-            "Open": "open",
-            "High": "high",
-            "Low": "low",
-            "Close": "close",
-            "Volume": "volume"
-        },
-        inplace=True
-    )
-    intraday_data = intraday_df.to_dict(orient="records")
+    tags = [
+        f"OR={p['open_range_minutes']}m",
+        "HoldToClose" if p["time_exit_minutes"] is None else f"TimeExit={p['time_exit_minutes']}m",
+        f"MaxEntries={p['max_entries']}"
+    ]
+    if p["use_volume_filter"]: tags.append("VolFilter")
+    if p["use_vwap_filter"]  : tags.append("VWAPFilter")
+    if p["stop_loss"] is not None: tags.append(f"SL={p['stop_loss']:.3%}")
+    if p["atr_stop_multiplier"] is not None: tags.append(f"ATRStop={p['atr_stop_multiplier']}x")
+    if p["limit_same_direction"]: tags.append("OppositeAfterLoss")
 
     return {
-        "scenarios": results,
-        "intraday_data": intraday_data
+        "strategy": func.__name__,
+        "filters": " + ".join(tags),
+        **p,
+        "win_rate": stats["win_rate"],
+        "profit_factor": stats["profit_factor"],
+        "sharpe_ratio": stats["sharpe_ratio"],
+        "max_drawdown": stats["max_drawdown"],
+        "num_trades": stats["num_trades"],
+        "net_pnl": round(net_pnl, 2),
+        "daily_trades": trades.to_dict(orient="records")
     }
 
-# Optional: allow command-line execution
-if __name__ == "__main__":
-    # Example: run the backtest for ticker "AAPL"
-    results = run_backtest("AAPL", days=30, interval="5m", strategy="opening_range_breakout")
-    print(results)
+# ---------- parallel executor ----------
+_global_df, _global_or = None, None  # set once in every worker
+
+def _init_pool(df, or_levels):
+    global _global_df, _global_or
+    _global_df, _global_or = df, or_levels
+
+def _evaluate(p):
+    res1 = _run_one(_global_df, backtest_orb,            _global_or, **p)
+    res2 = _run_one(_global_df, backtest_reverse_orb,    _global_or, **p)
+    return [res1, res2]
+
+def run_backtest_grid(ticker: str, days=30, interval="5m", top_n=10):
+    df_raw = fetch_intraday_data(ticker, days=days, interval=interval)
+    if df_raw.empty:
+        logger.warning("No data")
+        return {"scenarios": [], "intraday_data": []}
+
+    df        = _preprocess(df_raw)
+    or_levels = _build_or_lookup(df, [5, 10, 15, 30, 45])  # keep in sync with param_grid
+
+    # pool size = physical cores unless the machine is tiny
+    workers = max(1, min( multiprocessing.cpu_count(), 8))
+    scenarios = []
+
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        initializer=_init_pool,
+        initargs=(df, or_levels),
+    ) as pool:
+        futures = [pool.submit(_evaluate, p) for p in param_grid()]
+        for fut in as_completed(futures):
+            scenarios.extend(fut.result())
+
+    scenarios.sort(key=lambda s: (s["win_rate"], s["profit_factor"] or 0), reverse=True)
+    best = scenarios[:top_n]
+
+    candles = (df_raw.reset_index(names="timestamp")
+                  .rename(columns={"Open":"open","High":"high","Low":"low","Close":"close","Volume":"volume"}))
+    candles["timestamp"] = candles["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return {"scenarios": best, "intraday_data": candles.to_dict(orient="records")}

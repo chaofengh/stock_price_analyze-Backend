@@ -1,243 +1,141 @@
-# backtest_strategies/orb_strategies.py
-
-import datetime
-import pandas as pd
-import pytz
+"""
+ORB & Reverse‑ORB engine – now uses *pre‑computed* features
+and takes a pre‑calculated `or_levels` lookup to avoid
+re‑scanning the first N bars on every run.
+"""
+import datetime, numpy as np, pandas as pd, pytz
 from .date_utils import is_us_eastern_dst
 from .logging_config import logger
 
+# ───────── feature builders (called ONCE per request) ─────────
+def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    prev_close = df["Close"].shift(1)
+    tr = pd.concat(
+        [df["High"] - df["Low"],
+         (df["High"] - prev_close).abs(),
+         (df["Low"]  - prev_close).abs()], axis=1).max(axis=1)
+    return tr.rolling(period, min_periods=period).mean()
+
+def compute_intraday_vwap(df: pd.DataFrame) -> pd.Series:
+    px_vol = df["Close"] * df["Volume"]
+    cum_px_vol = px_vol.groupby(df.index.date).cumsum()
+    cum_vol    = df["Volume"].groupby(df.index.date).cumsum()
+    return cum_px_vol / cum_vol
+
+# ───────── generic ORB logic ─────────
 def _generic_orb_logic(
-    df,
-    open_range_minutes,
-    use_volume_filter,
-    stop_loss,
-    time_exit_minutes,
-    limit_same_direction,
-    max_entries,
-    reverse=False
+    df: pd.DataFrame,
+    or_levels: dict,                 # 〈── new
+    *,
+    open_range_minutes: int,
+    use_volume_filter: bool,
+    use_vwap_filter: bool,
+    stop_loss: float | None,
+    atr_stop_multiplier: float | None,
+    time_exit_minutes: int | None,
+    limit_same_direction: bool,
+    max_entries: int,
+    reverse: bool = False,
 ):
-    """
-    The core ORB logic, with a 'reverse' boolean to invert direction.
-    If reverse=False, crossing above the OR high => long, else short.
-    If reverse=True, crossing above the OR high => short, else long.
-    """
     if df.empty:
-        logger.warning("Empty DataFrame received for backtesting.")
         return pd.DataFrame()
 
-    df = df.copy()
-    df["date_utc"] = df.index.strftime("%Y-%m-%d")
-    grouped = df.groupby("date_utc")
+    # columns are already there – they were built once in runner.py
     all_trades = []
 
-    for day_str, day_data in grouped:
-        day_data = day_data.sort_index()
-        date_val = datetime.datetime.strptime(day_str, "%Y-%m-%d").date()
-
-        # Determine session times based on DST
-        if is_us_eastern_dst(date_val):
-            session_start_utc = "13:30"  # 9:30 ET
-            session_end_utc   = "20:00"  # 16:00 ET
-            entry_window_start_utc = "13:30"
-            entry_window_end_utc   = "16:00"
-        else:
-            session_start_utc = "14:30"  # 9:30 ET
-            session_end_utc   = "21:00"  # 16:00 ET
-            entry_window_start_utc = "14:30"
-            entry_window_end_utc   = "17:00"
-
-        full_day_data = day_data.between_time(session_start_utc, session_end_utc)
-        if full_day_data.empty:
+    for day_str, day_df in df.groupby("date_utc"):
+        session = day_df
+        if session.empty:
             continue
 
-        entry_data = full_day_data.between_time(entry_window_start_utc, entry_window_end_utc)
-        if entry_data.empty:
+        or_high, or_low = or_levels[open_range_minutes][day_str]
+
+        # volume filter
+        if use_volume_filter and session.iloc[:open_range_minutes // 5]["Volume"].sum() <= session["Volume"].mean():
             continue
-
-        # Determine how many bars define the opening range
-        try:
-            interval_minutes = (entry_data.index[1] - entry_data.index[0]).seconds / 60.0
-        except Exception:
-            continue
-
-        bars_for_open_range = max(1, int(open_range_minutes // interval_minutes))
-        if bars_for_open_range > len(entry_data):
-            continue
-
-        # Opening range
-        opening_range_data = entry_data.iloc[:bars_for_open_range]
-        or_high = opening_range_data["High"].max()
-        or_low = opening_range_data["Low"].min()
-
-        # Volume filter
-        or_volume = opening_range_data["Volume"].sum()
-        day_avg_volume = entry_data["Volume"].mean()
-        volume_ok = or_volume > day_avg_volume
-        if use_volume_filter and not volume_ok:
-            continue
-
-        trade_count = 0
-        last_trade_direction = None
-        last_trade_was_loss = False
 
         trade_open = False
-        direction = None
-        entry_price = None
-        exit_price = None
-        trade_entry_time = None
-        trade_exit_time = None
+        trade_count, last_loss = 0, False
+        last_dir, entry_price, entry_time, atr_at_entry, direction = None, None, None, None, None
 
-        for idx, row in full_day_data.iterrows():
-            current_time = idx.time()
-
+        for row in session.itertuples(): # slightly faster than .iterrows()
+            idx = row.Index   
             if not trade_open:
-                if trade_count < max_entries:
-                    if current_time <= datetime.time.fromisoformat(entry_window_end_utc):
-                        # Detect breakouts
-                        cross_above = (row["High"] > or_high)
-                        cross_below = (row["Low"] < or_low)
-
-                        if limit_same_direction and last_trade_was_loss and last_trade_direction:
-                            if last_trade_direction == "long":
-                                cross_above = False
-                            if last_trade_direction == "short":
-                                cross_below = False
-
-                        if not reverse:
-                            if cross_above:
-                                direction = "long"
-                                entry_price = row['High']
-                                trade_open = True
-                                trade_entry_time = idx
-                            elif cross_below:
-                                direction = "short"
-                                entry_price = row['Low']
-                                trade_open = True
-                                trade_entry_time = idx
-                        else:
-                            if cross_above:
-                                direction = "short"
-                                entry_price = row['High']
-                                trade_open = True
-                                trade_entry_time = idx
-                            elif cross_below:
-                                direction = "long"
-                                entry_price = row['Low']
-                                trade_open = True
-                                trade_entry_time = idx
-            else:
-                if idx == trade_entry_time:
+                if trade_count >= max_entries:
                     continue
 
-                current_close = row["Close"]
-                if stop_loss is not None:
-                    if direction == "long":
-                        stop_price = entry_price * (1 - stop_loss)
-                        if row["Low"] <= stop_price:
-                            exit_price = stop_price
-                            trade_exit_time = idx
-                    else:
-                        stop_price = entry_price * (1 + stop_loss)
-                        if row["High"] >= stop_price:
-                            exit_price = stop_price
-                            trade_exit_time = idx
+                cross_above = row.High > or_high
+                cross_below = row.Low  < or_low
 
-                if exit_price is None and time_exit_minutes is not None and trade_entry_time:
-                    elapsed = (idx - trade_entry_time).seconds / 60.0
-                    if elapsed >= time_exit_minutes:
-                        exit_price = current_close
-                        trade_exit_time = idx
+                # VWAP bias
+                if use_vwap_filter:
+                    if cross_above and row.Close < row.vwap: cross_above = False
+                    if cross_below and row.Close > row.vwap: cross_below = False
 
-                is_last_bar = (idx == full_day_data.index[-1])
-                if exit_price is None and is_last_bar:
-                    exit_price = current_close
-                    trade_exit_time = idx
+                # after‑loss filter
+                if limit_same_direction and last_loss:
+                    if last_dir == "long":  cross_above = False
+                    if last_dir == "short": cross_below = False
+
+                if not reverse:
+                    direction = "long"  if cross_above else "short" if cross_below else None
+                else:
+                    direction = "short" if cross_above else "long"  if cross_below else None
+
+                if direction:
+                    entry_price  = row.High if direction == "long" else row.Low
+                    atr_at_entry = row.atr
+                    entry_time   = idx
+                    trade_open   = True
+                    continue
+
+            # -------- manage open position --------
+            if trade_open:
+                exit_price = None
+                if stop_loss is not None:                # pct stop
+                    trigger = entry_price * (1 - stop_loss) if direction == "long" \
+                              else entry_price * (1 + stop_loss)
+                    if (direction == "long"  and row.Low  <= trigger) or \
+                       (direction == "short" and row.High >= trigger):
+                        exit_price = trigger
+
+                if exit_price is None and atr_stop_multiplier is not None:
+                    trigger = entry_price - atr_stop_multiplier * atr_at_entry if direction == "long" \
+                              else entry_price + atr_stop_multiplier * atr_at_entry
+                    if (direction == "long"  and row.Low  <= trigger) or \
+                       (direction == "short" and row.High >= trigger):
+                        exit_price = trigger
+
+                if exit_price is None and time_exit_minutes is not None:
+                    if (idx - entry_time).seconds // 60 >= time_exit_minutes:
+                        exit_price = row.Close
+
+                # end‑of‑session exit
+                if exit_price is None and idx == session.index[-1]:
+                    exit_price = row.Close
 
                 if exit_price is not None:
-                    pnl = (exit_price - entry_price) if direction == "long" else (entry_price - exit_price)
-                    all_trades.append({
-                        "date": day_str,
-                        "direction": direction,
-                        "entry_price": entry_price,
-                        "exit_price": exit_price,
-                        "pnl": pnl,
-                        "entry_time": trade_entry_time.astimezone(pytz.UTC).isoformat(),
-                        "exit_time": trade_exit_time.astimezone(pytz.UTC).isoformat(),
-                    })
-                    trade_count += 1
-                    last_trade_direction = direction
-                    last_trade_was_loss = (pnl < 0)
+                    pnl = exit_price - entry_price if direction == "long" else entry_price - exit_price
+                    all_trades.append(
+                        {
+                            "date": day_str,
+                            "direction": direction,
+                            "entry_price": round(entry_price, 4),
+                            "exit_price":  round(exit_price, 4),
+                            "pnl": round(pnl, 4),
+                            "entry_time": entry_time.isoformat(),
+                            "exit_time":  idx.isoformat(),
+                        }
+                    )
                     trade_open = False
-                    direction = None
-                    entry_price = None
-                    exit_price = None
-                    trade_entry_time = None
-                    trade_exit_time = None
-                    if trade_count >= max_entries:
-                        break
+                    trade_count += 1
+                    last_dir, last_loss = direction, pnl < 0
 
-        if trade_open and entry_price is not None:
-            final_close = full_day_data.iloc[-1]["Close"]
-            trade_exit_time = full_day_data.index[-1]
-            pnl = (final_close - entry_price) if direction == "long" else (entry_price - final_close)
-            all_trades.append({
-                "date": day_str,
-                "direction": direction,
-                "entry_price": entry_price,
-                "exit_price": final_close,
-                "pnl": pnl,
-                "entry_time": trade_entry_time.astimezone(pytz.UTC).isoformat(),
-                "exit_time": trade_exit_time.astimezone(pytz.UTC).isoformat(),
-            })
+    return pd.DataFrame(all_trades)
 
-    return pd.DataFrame(all_trades) if all_trades else pd.DataFrame()
+# ───────── wrappers ─────────
+def backtest_orb(df, or_levels, **kwargs):
+    return _generic_orb_logic(df, or_levels, reverse=False, **kwargs)
 
-def backtest_orb(
-    df,
-    open_range_minutes=30,
-    use_volume_filter=False,
-    stop_loss=None,
-    time_exit_minutes=None,
-    limit_same_direction=False,
-    max_entries=1
-):
-    """
-    Standard Opening Range Breakout:
-      - If price moves above the opening range high, go long.
-      - If price moves below the opening range low, go short.
-    """
-    return _generic_orb_logic(
-        df,
-        open_range_minutes=open_range_minutes,
-        use_volume_filter=use_volume_filter,
-        stop_loss=stop_loss,
-        time_exit_minutes=time_exit_minutes,
-        limit_same_direction=limit_same_direction,
-        max_entries=max_entries,
-        reverse=False
-    )
-
-def backtest_reverse_orb(
-    df,
-    open_range_minutes=30,
-    use_volume_filter=False,
-    stop_loss=None,
-    time_exit_minutes=None,
-    limit_same_direction=False,
-    max_entries=1
-):
-    """
-    Reverse Opening Range Breakout:
-      - If price moves above the opening range high, go short.
-      - If price moves below the opening range low, go long.
-    """
-    return _generic_orb_logic(
-        df,
-        open_range_minutes=open_range_minutes,
-        use_volume_filter=use_volume_filter,
-        stop_loss=stop_loss,
-        time_exit_minutes=time_exit_minutes,
-        limit_same_direction=limit_same_direction,
-        max_entries=max_entries,
-        reverse=True
-    )
+def backtest_reverse_orb(df, or_levels, **kwargs):
+    return _generic_orb_logic(df, or_levels, reverse=True, **kwargs)
