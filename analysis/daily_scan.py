@@ -22,6 +22,7 @@ def daily_scan():
     
     # Check for Bollinger touches
     touched_details = process_bollinger_touches(data_dict, mode='alert')
+    print(timestamp)
 
     return {
         "timestamp": timestamp,

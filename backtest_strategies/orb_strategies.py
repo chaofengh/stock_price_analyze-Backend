@@ -1,7 +1,13 @@
 """
-ORB & Reverse‑ORB engine – now uses *pre‑computed* features
-and takes a pre‑calculated `or_levels` lookup to avoid
-re‑scanning the first N bars on every run.
+ORB & Reverse-ORB engine – now uses *pre-computed* features
+and takes a pre-calculated `or_levels` lookup to avoid
+re-scanning the first N bars on every run.
+
+2025-04-25  Update:
+  • Break-out detection now compares the bar’s   Close   to
+    the OR high/low, not High/Low intrabar extremes.
+  • Entry price when the trade triggers is the bar’s Close,
+    matching the new comparison logic.
 """
 import datetime, numpy as np, pandas as pd, pytz
 from .date_utils import is_us_eastern_dst
@@ -40,7 +46,6 @@ def _generic_orb_logic(
     if df.empty:
         return pd.DataFrame()
 
-    # columns are already there – they were built once in runner.py
     all_trades = []
 
     for day_str, day_df in df.groupby("date_utc"):
@@ -58,21 +63,24 @@ def _generic_orb_logic(
         trade_count, last_loss = 0, False
         last_dir, entry_price, entry_time, atr_at_entry, direction = None, None, None, None, None
 
-        for row in session.itertuples(): # slightly faster than .iterrows()
-            idx = row.Index   
+        for row in session.itertuples():  # faster than .iterrows()
+            idx = row.Index
+
+            # -------- look for a new entry --------
             if not trade_open:
                 if trade_count >= max_entries:
                     continue
 
-                cross_above = row.High > or_high
-                cross_below = row.Low  < or_low
+                # ─── breakout test uses bar CLOSE now ───                #  ← CHANGED
+                cross_above = row.Close > or_high                         #  ← CHANGED
+                cross_below = row.Close < or_low                          #  ← CHANGED
 
                 # VWAP bias
                 if use_vwap_filter:
                     if cross_above and row.Close < row.vwap: cross_above = False
                     if cross_below and row.Close > row.vwap: cross_below = False
 
-                # after‑loss filter
+                # after-loss filter
                 if limit_same_direction and last_loss:
                     if last_dir == "long":  cross_above = False
                     if last_dir == "short": cross_below = False
@@ -83,7 +91,7 @@ def _generic_orb_logic(
                     direction = "short" if cross_above else "long"  if cross_below else None
 
                 if direction:
-                    entry_price  = row.High if direction == "long" else row.Low
+                    entry_price  = row.Close                              #  ← CHANGED
                     atr_at_entry = row.atr
                     entry_time   = idx
                     trade_open   = True
@@ -110,7 +118,7 @@ def _generic_orb_logic(
                     if (idx - entry_time).seconds // 60 >= time_exit_minutes:
                         exit_price = row.Close
 
-                # end‑of‑session exit
+                # end-of-session exit
                 if exit_price is None and idx == session.index[-1]:
                     exit_price = row.Close
 

@@ -9,7 +9,7 @@ OPEN_RANGE_MINUTES   = [5, 10, 15, 30, 45]
 STOP_LOSS_PCTS       = [None, 0.003, 0.005, 0.01]
 ATR_STOP_MULTIPLIERS = [None, 1.0, 1.5, 2.0]
 
-TIME_EXIT_MINUTES    = [5, 10, 15, 30, 60, 90, 120, None]
+TIME_EXIT_MINUTES    = [5, 10, 15, 30, 60, 90, 120,180,240, None]
 
 USE_VOLUME_FILTER    = [False, True]
 USE_VWAP_FILTER      = [False, True]      # NEW  ←─────────────

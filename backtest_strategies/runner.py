@@ -87,7 +87,7 @@ def _evaluate(p):
     res2 = _run_one(_global_df, backtest_reverse_orb,    _global_or, **p)
     return [res1, res2]
 
-def run_backtest_grid(ticker: str, days=30, interval="5m", top_n=10):
+def run_backtest_grid(ticker: str, days=30, interval="5m", top_n=20):
     df_raw = fetch_intraday_data(ticker, days=days, interval=interval)
     if df_raw.empty:
         logger.warning("No data")
