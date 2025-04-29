@@ -8,6 +8,8 @@ from flask import Flask
 from flask_cors import CORS
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler import events
+
 
 # Import your blueprints
 from routes.summary_routes import summary_blueprint
@@ -52,25 +54,31 @@ def create_app(testing=False):
     return app
 
 def create_scheduler():
+    eastern = pytz.timezone("US/Eastern")
+    scheduler = BackgroundScheduler(timezone=eastern, job_defaults={
+        "misfire_grace_time": 300      # 5-minute grace
+    })
 
-    eastern = pytz.timezone('US/Eastern')
-    scheduler = BackgroundScheduler()
-
-    # Existing daily scan job (example scheduling)
     scheduler.add_job(
-        daily_scan_wrapper, 
-        'cron', 
-        day_of_week='mon-fri', 
-        hour=16, 
+        daily_scan_wrapper,
+        trigger="cron",
+        id="daily_scan",
+        day_of_week="mon-fri",
+        hour=16,
         minute=2,
-        timezone=eastern
     )
+    def _log(event):
+        if event.exception:
+            app.logger.error("Job %s failed: %s", event.job_id, event.exception)
+        else:
+            app.logger.info("Job %s executed OK", event.job_id)
 
-    # Start the breakout scanner job (from 10:00 AM to 12:00 PM Eastern, every 2 minutes)
+    scheduler.add_listener(_log, events.EVENT_JOB_EXECUTED | events.EVENT_JOB_ERROR)
 
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown(wait=False))
     return scheduler
+
 
 if __name__ == "__main__":
     app = create_app()

@@ -21,6 +21,8 @@ def alerts_stream():
         last_known_date = None
         while True:
             if daily_scan_tasks.latest_scan_result:
+
+                print("latest_scan_result:\n", daily_scan_tasks.latest_scan_result)
                 current_date = daily_scan_tasks.latest_scan_result["timestamp"].split(" ")[0]
                 if current_date != last_known_date:
                     # Start with the global scan result.
