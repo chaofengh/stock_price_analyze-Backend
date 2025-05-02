@@ -4,6 +4,8 @@ from .event_detection import process_bollinger_touches, detect_hug_events, find_
 def get_touch_and_hug_events(data):
     touches = process_bollinger_touches(data,mode='historical')
     hug_events_upper, hug_events_lower = detect_hug_events(data, touches)
+
+    print('this is hug_event_lower\n',hug_events_lower)
     return touches, hug_events_upper, hug_events_lower
 
 def compute_bounces_and_pullbacks(data, touches, hug_events_upper, hug_events_lower, window: int) -> dict:

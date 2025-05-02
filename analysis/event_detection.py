@@ -72,63 +72,76 @@ def process_bollinger_touches(data, mode='alert'):
     return results
 
 
-def detect_hug_events(data: pd.DataFrame, touches: list, threshold: float = 1.0):
+def detect_hug_events(
+    data: pd.DataFrame,
+    touches: list,
+    min_group_len: int = 2,   # require at least this many consecutive days for an event
+) -> tuple[list[dict], list[dict]]:
     """
-    Detects multi-day hugs where prices remain near the Bollinger Bands.
+    Build multi-day “hug” events directly from the `touches` list.
+
+    A hug event is defined as ≥ `min_group_len` **consecutive trading days**
+    where each close was already flagged as touching a Bollinger band.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Original price/Bollinger-band frame (used only for look-ups).
+    touches : list[dict]
+        Output of `process_bollinger_touches`, containing *index*, *date*,
+        *price* and which *band* was touched.
+    min_group_len : int, default 2
+        Minimum number of consecutive touches to qualify as one event.
+
+    Returns
+    -------
+    hug_events_upper : list[dict]
+    hug_events_lower : list[dict]
     """
-    def near_band(row, band_key, threshold):
-        if pd.isna(row[band_key]):
-            return False
-        diff_pct = abs(row['close'] - row[band_key]) / row[band_key] * 100
-        return diff_pct <= threshold
 
-    hug_events_upper = []
-    hug_events_lower = []
-    n = len(data)
-    i = 0
-    while i < n:
-        up_touch = [t for t in touches if t['index'] == i and t['band'] == 'upper']
-        if up_touch:
-            day_indices = [i]
-            j = i + 1
-            while j < n and near_band(data.loc[j], 'BB_upper', threshold):
-                day_indices.append(j)
-                j += 1
-            if len(day_indices) > 1:
-                hug_events_upper.append({
-                    'band': 'upper',
-                    'start_index': day_indices[0],
-                    'end_index': day_indices[-1],
-                    'start_date': data.loc[day_indices[0], 'date'],
-                    'end_date': data.loc[day_indices[-1], 'date'],
-                    'start_price': float(data.loc[day_indices[0], 'close']),
-                    'end_price': float(data.loc[day_indices[-1], 'close'])
-                })
-                i = day_indices[-1] + 1
-                continue
+    # --- organise touches by band & sort by index --------------------------------
+    by_band = {"upper": [], "lower": []}
+    for t in touches:
+        by_band[t["band"]].append(t)
 
-        low_touch = [t for t in touches if t['index'] == i and t['band'] == 'lower']
-        if low_touch:
-            day_indices = [i]
-            j = i + 1
-            while j < n and near_band(data.loc[j], 'BB_lower', threshold):
-                day_indices.append(j)
-                j += 1
-            if len(day_indices) > 1:
-                hug_events_lower.append({
-                    'band': 'lower',
-                    'start_index': day_indices[0],
-                    'end_index': day_indices[-1],
-                    'start_date': data.loc[day_indices[0], 'date'],
-                    'end_date': data.loc[day_indices[-1], 'date'],
-                    'start_price': float(data.loc[day_indices[0], 'close']),
-                    'end_price': float(data.loc[day_indices[-1], 'close'])
-                })
-                i = day_indices[-1] + 1
-                continue
-        i += 1
+    for band in by_band:
+        by_band[band].sort(key=lambda x: x["index"])
+
+    # --- helper to collapse consecutive-index blocks into events ------------------
+    def build_events(band: str, band_touches: list[dict]) -> list[dict]:
+        events, group = [], []
+
+        def flush():
+            if len(group) >= min_group_len:
+                events.append(
+                    {
+                        "band": band,
+                        "start_index": group[0]["index"],
+                        "end_index": group[-1]["index"],
+                        "start_date": data.loc[group[0]["index"], "date"],
+                        "end_date": data.loc[group[-1]["index"], "date"],
+                        "start_price": float(group[0]["price"]),
+                        "end_price": float(group[-1]["price"]),
+                    }
+                )
+
+        for t in band_touches:
+            if not group:
+                group.append(t)
+            elif t["index"] == group[-1]["index"] + 1:
+                group.append(t)
+            else:
+                flush()
+                group = [t]
+
+        flush()  # catch the final block
+        return events
+
+    hug_events_upper = build_events("upper", by_band["upper"])
+    hug_events_lower = build_events("lower", by_band["lower"])
 
     return hug_events_upper, hug_events_lower
+
 
 # New short-term high/low using a fixed lookahead window
 def find_short_term_high(df, start_idx, window=5):
