@@ -13,7 +13,7 @@ def backtest_endpoint():
         days   – look‑back window in trading days (default: 30)
     """
     ticker = request.args.get("ticker", "AAPL").upper()
-    days   = int(request.args.get("days", 30))
+    days   = '30d'
 
     payload = run_backtest_grid(ticker=ticker, days=days)
     return jsonify(payload), 200
