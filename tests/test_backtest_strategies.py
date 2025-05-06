@@ -1,10 +1,9 @@
 # tests/test_backtest_strategies.py
 import pandas as pd
-import pytest
+import numpy as np
 from unittest.mock import patch
 
 # Project imports
-from backtest_strategies.data_fetcher import fetch_intraday_data
 from backtest_strategies.metrics import compute_metrics
 from backtest_strategies.orb_strategies import backtest_orb
 from backtest_strategies.runner import run_backtest_grid
@@ -15,7 +14,7 @@ from backtest_strategies.runner import run_backtest_grid
 # ───────────────────────────────────────────────────────────────
 def _build_or_levels(df: pd.DataFrame, or_minutes: int) -> dict[int, dict[str, tuple[float, float]]]:
     """
-    A bare‑bones stand‑in for runner._build_or_lookup – just enough for this test.
+    Minimal stand‑in for runner._build_or_lookup
         {or_minutes: {date_str: (or_high, or_low)}}
     """
     day_str = df.index[0].strftime("%Y-%m-%d")
@@ -50,8 +49,6 @@ def test_backtest_opening_range_breakout():
     """
     Tiny one‑day dataset: price climbs straight up, so ORB should open **long**.
     """
-    import numpy as np  # local import keeps global namespace clean
-
     date_str = "2023-06-15"
     times = pd.date_range(f"{date_str} 13:30", periods=10, freq="30T", tz="UTC")
 
@@ -64,12 +61,15 @@ def test_backtest_opening_range_breakout():
     }, index=times)
 
     # ─── minimal extra columns expected by backtest_orb ───
-    df_test["atr"]        = 1.0                      # constant dummy
-    df_test["vwap"]       = df_test["close"]         # simple proxy
-    df_test["BB_upper"]   = np.nan                   # unused in this test
+    df_test["atr"]        = 1.0
+    df_test["vwap"]       = df_test["close"]
+    df_test["BB_upper"]   = np.nan
     df_test["BB_lower"]   = np.nan
     df_test["support"]    = np.nan
     df_test["resistance"] = np.nan
+
+    # NEW: trading‑day key expected by updated orb logic
+    df_test["trade_date"] = df_test.index.date
 
     or_minutes = 30
     or_levels  = _build_or_levels(df_test, or_minutes)
@@ -94,8 +94,6 @@ def test_backtest_opening_range_breakout():
     assert trades.iloc[0]["direction"] == "long"
 
 
-
-
 # ───────────────────────────────────────────────────────────────
 # end‑to‑end grid runner
 # ───────────────────────────────────────────────────────────────
@@ -107,32 +105,31 @@ def test_run_backtest(mock_fetch):
     date_str = "2023-06-15"
     times = pd.date_range(f"{date_str} 13:30", periods=3, freq="5T", tz="UTC")
     df_mock = pd.DataFrame({
-        "Open":   [100, 101, 102],
-        "High":   [101, 102, 103],
-        "Low":    [ 99, 100, 101],
-        "Close":  [100, 101, 102],
-        "Volume": [1000, 1200, 1100],
+        # NOTE: lower‑case column names match the real pipeline
+        "open":   [100, 101, 102],
+        "high":   [101, 102, 103],
+        "low":    [ 99, 100, 101],
+        "close":  [100, 101, 102],
+        "volume": [1000, 1200, 1100],
     }, index=times)
     mock_fetch.return_value = df_mock
 
-    # NOTE: no “strategy=” kwarg – the real function doesn’t accept it
     result = run_backtest_grid("TSLA", days=1, interval="5m")
 
     assert {"scenarios", "intraday_data"}.issubset(result.keys())
     assert isinstance(result["scenarios"], list)
     assert isinstance(result["intraday_data"], list)
 
-    # scenarios should carry the fields produced by the live runner
     required_fields = {
         "strategy", "filters", "open_range_minutes",
         "win_rate", "profit_factor", "sharpe_ratio",
-        "max_drawdown", "num_trades", "net_pnl"
+        "max_drawdown", "num_trades", "net_pnl",
     }
     for scenario in result["scenarios"]:
         assert required_fields.issubset(scenario.keys())
 
-    # intraday rows keep the original (Pascal‑case) OHLCV names
+    # intraday rows now carry lower‑case OHLCV names
     if result["intraday_data"]:
         sample = result["intraday_data"][0]
-        for k in ("Open", "High", "Low", "Close", "Volume"):
+        for k in ("open", "high", "low", "close", "volume"):
             assert k in sample
