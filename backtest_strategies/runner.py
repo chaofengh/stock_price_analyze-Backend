@@ -34,9 +34,7 @@ def _preprocess(df: pd.DataFrame) -> pd.DataFrame:
 
 # ────────────────────────────────────────────────
 def _build_or_lookup(df: pd.DataFrame, or_minutes_list) -> dict:
-    """
-    or_levels[m][day] = (or_high, or_low)
-    """
+
     lookup = {m: {} for m in or_minutes_list}
 
     for day_str, day_df in df.groupby("date_utc"):
