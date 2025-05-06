@@ -1,15 +1,4 @@
-"""
-Parameter‑grid generator
-–––––––––––––––––––––––––
-Guarantees that *exactly one* exit mechanism is active per scenario.
-
-Exit types considered exclusive:
-    • time‑based exit
-    • Bollinger profit‑take
-    • % stop‑loss
-    • ATR stop
-    • S/R flip
-"""
+#param_grid.py
 
 from itertools import product
 

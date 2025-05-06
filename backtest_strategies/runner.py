@@ -1,14 +1,6 @@
 # backtest_strategies/runner.py
 # =============================
-"""
-Parallel grid‑runner for intraday strategies
-––––––––––––––––––––––––––––––––––––––––––––
-• Two‑pass execution:
-      1) metrics‑only for the entire grid (fast, tiny JSON)
-      2) re‑run top‑N scenarios and attach full trade logs
-• Uses Joblib / loky to avoid DataFrame pickling overhead.
-• Compatible with the “exactly‑one‑exit‑style” parameter grid.
-"""
+
 
 from concurrent.futures import as_completed
 import multiprocessing, pandas as pd
@@ -40,21 +32,35 @@ def _preprocess(df: pd.DataFrame) -> pd.DataFrame:
     return df.dropna(subset=["atr", "vwap", "BB_upper", "BB_lower"])
 
 
+# ────────────────────────────────────────────────
 def _build_or_lookup(df: pd.DataFrame, or_minutes_list) -> dict:
     """
     or_levels[m][day] = (or_high, or_low)
     """
     lookup = {m: {} for m in or_minutes_list}
+
     for day_str, day_df in df.groupby("date_utc"):
-        session = day_df.between_time("14:30", "21:00")
-        if session.empty:
+        session = day_df.between_time("14:30", "21:00")   # 9:30–16:00 ET
+        if len(session) < 2:
             continue
+
         bar_min = int((session.index[1] - session.index[0]).seconds / 60)
+
         for m in or_minutes_list:
             or_bars = max(1, m // bar_min)
             block   = session.iloc[:or_bars]
-            lookup[m][day_str] = (block["high"].max(), block["low"].min())
+
+            or_high = block["high"].max()
+            or_low  = block["low"].min()
+
+            # defend against NaNs
+            if pd.isna(or_high) or pd.isna(or_low):
+                continue
+
+            lookup[m][day_str] = (or_high, or_low)
+
     return lookup
+
 
 
 # ────────────────────────────────────────────────────────────────

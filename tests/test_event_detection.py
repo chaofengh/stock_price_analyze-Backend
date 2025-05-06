@@ -23,21 +23,37 @@ def test_detect_touches():
     assert len(touches) == 6
 
 def test_detect_hug_events():
+    # build a 5-day DataFrame with flat Bollinger bands
     df = pd.DataFrame({
         'date': pd.date_range('2021-01-01', periods=5),
         'close': [10, 10.1, 10.2, 10.1, 10],
         'BB_upper': [10, 10, 10, 10, 10],
         'BB_lower': [5, 5, 5, 5, 5],
     })
-    # All these days are near or above the upper band (close ~10 vs BB_upper=10)
-    # We'll artificially trigger a "touch" on the first day
-    touches = [{'date': df.loc[0, 'date'], 'index': 0, 'band': 'upper', 'price': 10.0}]
-    ups, lows = detect_hug_events(df, touches, threshold=2.0)
-    # We might expect to find one hug event in ups
+
+    # artificially trigger touches on days 0 and 1 (consecutive)
+    touches = [
+        {'date': df.loc[0, 'date'], 'index': 0, 'band': 'upper', 'price': 10.0},
+        {'date': df.loc[1, 'date'], 'index': 1, 'band': 'upper', 'price': 10.1},
+    ]
+
+    # require at least 2 consecutive touches to form a hug event
+    ups, lows = detect_hug_events(df, touches, min_group_len=2)
+
+    # we should get exactly one "upper" hug event covering indices 0→1
     assert len(ups) == 1
-    assert ups[0]['start_index'] == 0
-    # No lower band touches
-    assert len(lows) == 0
+
+    event = ups[0]
+    assert event['band']        == 'upper'
+    assert event['start_index'] == 0
+    assert event['end_index']   == 1
+    assert event['start_date']  == df.loc[0, 'date']
+    assert event['end_date']    == df.loc[1, 'date']
+    assert event['start_price'] == 10.0
+    assert event['end_price']   == 10.1
+
+    # no lower‐band hugs
+    assert lows == []
 
 def test_find_short_term_high():
     df = pd.DataFrame({'close': [10, 12, 11, 13, 8, 15]})

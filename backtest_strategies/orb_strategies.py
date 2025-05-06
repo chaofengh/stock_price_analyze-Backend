@@ -1,8 +1,10 @@
 # ORB & Reverse‑ORB engine – mutually‑exclusive exit styles
 from __future__ import annotations
-import numpy as np, pandas as pd
+import numpy as np
+import pandas as pd
 from typing import Optional
 from .logging_config import logger
+
 
 # ───── helper indicators ───────────────────────────────────────
 def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -15,13 +17,13 @@ def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 
 def compute_intraday_vwap(df: pd.DataFrame) -> pd.Series:
-    pv   = df["close"] * df["volume"]
-    cum_pv  = pv.groupby(df.index.date).cumsum()
-    cum_vol = df["volume"].groupby(df.index.date).cumsum()
+    pv       = df["close"] * df["volume"]
+    cum_pv   = pv.groupby(df.index.date).cumsum()
+    cum_vol  = df["volume"].groupby(df.index.date).cumsum()
     return cum_pv / cum_vol
 
 
-# ───── core back‑test loop (pure Python) ───────────────────────
+# ───── core back‑test loop ────────────────────────────────────
 def _generic_orb_logic(
     df: pd.DataFrame,
     or_levels: dict,
@@ -38,47 +40,75 @@ def _generic_orb_logic(
     max_entries: int,
     reverse: bool = False,
 ) -> pd.DataFrame:
-    """Back‑test ORB (or Reverse ORB) with *exactly one* exit rule."""
+    """
+    Pure‑Python ORB / Reverse‑ORB back‑tester.
+    Uses **row.close** for break‑out detection but *waits*
+    until the open‑range block has fully printed.
+    """
     if df.empty:
         return pd.DataFrame()
 
     trades = []
 
     for day_str, session in df.groupby("date_utc"):
-        if session.empty:
+
+        # safety — malformed sessions
+        if len(session) < 2 or day_str not in or_levels[open_range_minutes]:
             continue
 
+        # granular timing info
+        bar_min  = int((session.index[1] - session.index[0]).seconds / 60)
+        or_bars  = max(1, open_range_minutes // bar_min)
         or_high, or_low = or_levels[open_range_minutes][day_str]
 
-        # ───── optional volume filter on the OR block ───────────
+        # guard against NaN OR values
+        if pd.isna(or_high) or pd.isna(or_low):
+            continue
+
+        # optional volume filter ON THE OR BLOCK
         if use_volume_filter:
-            vol_block = session.iloc[: open_range_minutes // 5]["volume"].sum()
+            vol_block = session.iloc[:or_bars]["volume"].sum()
             if vol_block <= session["volume"].mean():
                 continue
 
-        trade_open = False
-        trade_count, last_loss = 0, False
-        last_dir = None
+        first_tradable_bar = (
+            session.index[or_bars] if len(session) > or_bars else None
+        )
+
+        trade_open, trade_count = False, 0
+        last_loss, last_dir     = False, None
 
         for row in session.itertuples():
             idx = row.Index
 
-            # ───────────── ENTRY LOGIC ─────────────
+            # ───────────────── ENTRY ─────────────────
             if not trade_open and trade_count < max_entries:
+
+                # wait until OR window is over
+                if first_tradable_bar and idx < first_tradable_bar:
+                    continue
+
                 cross_above = row.close > or_high
                 cross_below = row.close < or_low
 
+                # VWAP filter (intraday trend confirmation)
                 if use_vwap_filter:
-                    if cross_above and row.close < row.vwap: cross_above = False
-                    if cross_below and row.close > row.vwap: cross_below = False
+                    if cross_above and row.close < row.vwap:
+                        cross_above = False
+                    if cross_below and row.close > row.vwap:
+                        cross_below = False
 
+                # “don’t repeat same‑direction after loss”
                 if limit_same_direction and last_loss:
-                    if last_dir == "long":  cross_above = False
-                    if last_dir == "short": cross_below = False
+                    if last_dir == "long":
+                        cross_above = False
+                    if last_dir == "short":
+                        cross_below = False
 
                 direction = (
-                    ("short" if reverse else "long") if cross_above else
-                    ("long"  if reverse else "short") if cross_below else None
+                    ("short" if reverse else "long")  if cross_above else
+                    ("long"  if reverse else "short") if cross_below else
+                    None
                 )
 
                 if direction:
@@ -88,7 +118,7 @@ def _generic_orb_logic(
                     trade_open   = True
                     continue
 
-            # ──────────── MANAGE OPEN POSITION ────────────
+            # ───────────────── MANAGEMENT ────────────────
             if trade_open:
                 exit_px = None
 
@@ -99,9 +129,10 @@ def _generic_orb_logic(
                         exit_px = row.close
 
                 # 2) S/R flip
-                if use_sr_exit and exit_px is None and pd.notna(row.support) and pd.notna(row.resistance):
-                    if (direction == "short" and row.close > row.resistance) or \
-                       (direction == "long"  and row.close < row.support):
+                if exit_px is None and use_sr_exit:
+                    if direction == "long"  and pd.notna(row.support)    and row.close < row.support:
+                        exit_px = row.close
+                    if direction == "short" and pd.notna(row.resistance) and row.close > row.resistance:
                         exit_px = row.close
 
                 # 3) %-stop
@@ -123,9 +154,8 @@ def _generic_orb_logic(
 
                 # 5) time‑based exit
                 if (
-                    exit_px is None and
-                    time_exit_minutes is not None and
-                    (idx - entry_time).seconds // 60 >= time_exit_minutes
+                    exit_px is None and time_exit_minutes is not None and
+                    (idx - entry_time).total_seconds() // 60 >= time_exit_minutes
                 ):
                     exit_px = row.close
 
@@ -133,7 +163,7 @@ def _generic_orb_logic(
                 if exit_px is None and idx == session.index[-1]:
                     exit_px = row.close
 
-                # — record trade —
+                # ───── record trade ─────
                 if exit_px is not None:
                     pnl = exit_px - entry_px if direction == "long" else entry_px - exit_px
                     trades.append(
@@ -154,7 +184,7 @@ def _generic_orb_logic(
     return pd.DataFrame(trades)
 
 
-# ───── wrapper functions ───────────────────────────────────────
+# ───── wrappers ────────────────────────────────────────────────
 def backtest_orb(df, or_levels, **kw):
     return _generic_orb_logic(df, or_levels, reverse=False, **kw)
 
