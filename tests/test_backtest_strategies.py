@@ -64,7 +64,6 @@ def test_backtest_opening_range_breakout():
     }, index=times)
 
     # ─── minimal extra columns expected by backtest_orb ───
-    df_test["date_utc"]   = df_test.index.strftime("%Y-%m-%d")
     df_test["atr"]        = 1.0                      # constant dummy
     df_test["vwap"]       = df_test["close"]         # simple proxy
     df_test["BB_upper"]   = np.nan                   # unused in this test

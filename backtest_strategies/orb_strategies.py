@@ -1,4 +1,11 @@
-# ORB & Reverse‑ORB engine – mutually‑exclusive exit styles
+"""
+ORB & Reverse‑ORB engine – mutually‑exclusive exit styles
+---------------------------------------------------------
+The only edits here are:
+• Group trades by df["trade_date"] instead of df["date_utc"]
+• No timezone columns or conversions are referenced any more
+"""
+
 from __future__ import annotations
 import numpy as np
 import pandas as pd
@@ -10,9 +17,13 @@ from .logging_config import logger
 def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     prev_close = df["close"].shift(1)
     tr = pd.concat(
-        [df["high"] - df["low"],
-         (df["high"] - prev_close).abs(),
-         (df["low"]  - prev_close).abs()], axis=1).max(axis=1)
+        [
+            df["high"] - df["low"],
+            (df["high"] - prev_close).abs(),
+            (df["low"]  - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
     return tr.rolling(period, min_periods=period).mean()
 
 
@@ -40,28 +51,21 @@ def _generic_orb_logic(
     max_entries: int,
     reverse: bool = False,
 ) -> pd.DataFrame:
-    """
-    Pure‑Python ORB / Reverse‑ORB back‑tester.
-    Uses **row.close** for break‑out detection but *waits*
-    until the open‑range block has fully printed.
-    """
     if df.empty:
         return pd.DataFrame()
 
     trades = []
 
-    for day_str, session in df.groupby("date_utc"):
+    for day, session in df.groupby("trade_date"):
+        day_key = day.isoformat()  # matches key used in or_levels
 
-        # safety — malformed sessions
-        if len(session) < 2 or day_str not in or_levels[open_range_minutes]:
+        if len(session) < 2 or day_key not in or_levels[open_range_minutes]:
             continue
 
-        # granular timing info
         bar_min  = int((session.index[1] - session.index[0]).seconds / 60)
         or_bars  = max(1, open_range_minutes // bar_min)
-        or_high, or_low = or_levels[open_range_minutes][day_str]
+        or_high, or_low = or_levels[open_range_minutes][day_key]
 
-        # guard against NaN OR values
         if pd.isna(or_high) or pd.isna(or_low):
             continue
 
@@ -71,9 +75,7 @@ def _generic_orb_logic(
             if vol_block <= session["volume"].mean():
                 continue
 
-        first_tradable_bar = (
-            session.index[or_bars] if len(session) > or_bars else None
-        )
+        first_tradable_bar = session.index[or_bars] if len(session) > or_bars else None
 
         trade_open, trade_count = False, 0
         last_loss, last_dir     = False, None
@@ -81,24 +83,22 @@ def _generic_orb_logic(
         for row in session.itertuples():
             idx = row.Index
 
-            # ───────────────── ENTRY ─────────────────
+            # ───────── ENTRY ─────────
             if not trade_open and trade_count < max_entries:
-
-                # wait until OR window is over
                 if first_tradable_bar and idx < first_tradable_bar:
                     continue
 
                 cross_above = row.close > or_high
                 cross_below = row.close < or_low
 
-                # VWAP filter (intraday trend confirmation)
+                # VWAP filter
                 if use_vwap_filter:
                     if cross_above and row.close < row.vwap:
                         cross_above = False
                     if cross_below and row.close > row.vwap:
                         cross_below = False
 
-                # “don’t repeat same‑direction after loss”
+                # don’t repeat same‑direction after loss
                 if limit_same_direction and last_loss:
                     if last_dir == "long":
                         cross_above = False
@@ -118,7 +118,7 @@ def _generic_orb_logic(
                     trade_open   = True
                     continue
 
-            # ───────────────── MANAGEMENT ────────────────
+            # ───────── MANAGEMENT ─────────
             if trade_open:
                 exit_px = None
 
@@ -168,7 +168,7 @@ def _generic_orb_logic(
                     pnl = exit_px - entry_px if direction == "long" else entry_px - exit_px
                     trades.append(
                         {
-                            "date": day_str,
+                            "date": day_key,
                             "direction": direction,
                             "entry_price": round(entry_px, 4),
                             "exit_price": round(exit_px, 4),
