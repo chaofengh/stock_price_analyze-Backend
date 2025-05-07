@@ -1,38 +1,61 @@
 # backtest_strategies/metrics.py
-
+from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-def compute_metrics(trades):
+
+def compute_metrics(trades: pd.DataFrame) -> dict[str, float | int]:
+    """Return a dict of basic performance statistics."""
+    # ─── Empty or malformed input ──────────────────────────────
     if trades.empty or "pnl" not in trades.columns:
         return {
-            "win_rate": 0.0,
-            "profit_factor": None,
-            "sharpe_ratio": None,
-            "max_drawdown": None,
-            "num_trades": 0
+            "win_rate":      0.0,
+            "profit_factor": float("inf"),
+            "sharpe_ratio":  np.nan,
+            "max_drawdown":  0.0,
+            "num_trades":    0,
         }
-    pnl_series = pd.Series(trades['pnl'])
-    wins = pnl_series[pnl_series > 0]
-    losses = pnl_series[pnl_series <= 0]
-    win_rate = len(wins) / len(pnl_series) if len(pnl_series) > 0 else 0.0
-    total_win = wins.sum()
-    total_loss = abs(losses.sum())
-    profit_factor = total_win / total_loss if total_loss != 0 else np.nan
 
-    mean_return = pnl_series.mean()
-    std_return = pnl_series.std()
-    risk_free_rate = 0.0
-    sharpe_ratio = (mean_return - risk_free_rate) / std_return if std_return != 0 else np.nan
+    pnl = pd.Series(trades["pnl"].astype(float), copy=False)
+    num_trades = len(pnl)
 
-    equity_curve = pnl_series.cumsum()
-    rolling_max = equity_curve.cummax()
-    max_drawdown = (equity_curve - rolling_max).min()
+    # ─── Win / loss decomposition ─────────────────────────────
+    wins   = pnl[pnl > 0]
+    losses = pnl[pnl < 0]                # exclude break‑even
+
+    win_rate = len(wins) / num_trades if num_trades else 0.0
+
+    gross_profit = wins.sum()
+    gross_loss   = -losses.sum()         # positive value
+
+    profit_factor = (
+        float("inf") if gross_loss == 0
+        else gross_profit / gross_loss
+    )
+
+    # ─── Simple per‑trade Sharpe ratio (no risk‑free rate) ───
+    std_pnl = pnl.std(ddof=0)
+    sharpe_ratio = pnl.mean() / std_pnl if std_pnl else np.nan
+
+    # ─── Max drawdown on cumulative equity curve ─────────────
+    equity_curve = pnl.cumsum()
+    running_max  = equity_curve.cummax()
+    max_drawdown = (equity_curve - running_max).min()  # negative or zero
+
+    # ─── Utility for consistent rounding ─────────────────────
+    def _r(x, p):
+        if isinstance(x, float) and not np.isfinite(x):
+            return x          # keep inf / nan untouched
+        return round(x, p)
 
     return {
-        "win_rate": round(win_rate, 3),
-        "profit_factor": round(profit_factor, 3) if profit_factor == profit_factor else None,
-        "sharpe_ratio": round(sharpe_ratio, 3) if sharpe_ratio == sharpe_ratio else None,
-        "max_drawdown": round(max_drawdown, 2) if max_drawdown == max_drawdown else None,
-        "num_trades": len(trades)
+        # keep full precision so tests comparing to 2/3 pass exactly
+        "win_rate":      win_rate,
+
+        "profit_factor": profit_factor if not np.isfinite(profit_factor)
+                         else _r(profit_factor, 3),
+
+        "sharpe_ratio":  _r(sharpe_ratio, 3),
+        "max_drawdown":  _r(max_drawdown, 2),
+        "num_trades":    int(num_trades),
     }

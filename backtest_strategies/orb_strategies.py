@@ -1,10 +1,4 @@
-"""
-ORB & Reverse‑ORB engine – mutually‑exclusive exit styles
----------------------------------------------------------
-The only edits here are:
-• Group trades by df["trade_date"] instead of df["date_utc"]
-• No timezone columns or conversions are referenced any more
-"""
+#orb_strategies.py
 
 from __future__ import annotations
 import numpy as np

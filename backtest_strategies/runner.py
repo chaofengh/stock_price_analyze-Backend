@@ -1,9 +1,4 @@
-"""
-Parallel grid‑runner for intraday strategies
-––––––––––––––––––––––––––––––––––––––––––––
-1) metrics‑only for the entire grid (fast, tiny JSON)
-2) re‑run top‑N scenarios and attach full trade logs
-"""
+#runner.py
 
 from concurrent.futures import as_completed
 import multiprocessing
