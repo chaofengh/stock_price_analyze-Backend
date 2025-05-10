@@ -1,23 +1,27 @@
-#runner.py
+"""
+Parallel grid‑runner for intraday strategies
+––––––––––––––––––––––––––––––––––––––––––––
+• Two‑pass execution:
+      1) metrics‑only for the entire grid (fast, tiny JSON)
+      2) re‑run top‑N scenarios and attach full trade logs
+• Deduplicates scenarios that produce an identical trade log and
+  back‑fills until exactly `top_n` unique scenarios are returned.
+• Uses Joblib / loky to avoid DataFrame pickling overhead.
+"""
 
+from __future__ import annotations
 from concurrent.futures import as_completed
-import multiprocessing
-import pandas as pd
+import multiprocessing, json, hashlib, pandas as pd
 from joblib import Parallel, delayed, parallel_backend
 
 from .data_fetcher import fetch_intraday_data
 from .param_grid   import generate as param_grid
 from .metrics      import compute_metrics
-from analysis.indicators import (
-    compute_bollinger_bands,
-    compute_realtime_sr,
-)
+from analysis.indicators import (compute_bollinger_bands, compute_realtime_sr)
 from .logging_config import logger
 from .orb_strategies import (
-    compute_atr,
-    compute_intraday_vwap,
-    backtest_orb,
-    backtest_reverse_orb,
+    compute_atr, compute_intraday_vwap,
+    backtest_orb, backtest_reverse_orb,
 )
 from .bb_sr_strategies import (
     backtest_bbands,
@@ -136,9 +140,17 @@ def _evaluate_metrics_only(df, or_levels, p):
     res = []
     res.append(_run_one_metrics_only(df, backtest_orb,         or_levels, **p))
     res.append(_run_one_metrics_only(df, backtest_reverse_orb, or_levels, **p))
-    res.append(_run_one_metrics_only(df, backtest_bbands,              None, **SINGLE_PASS_DEFAULTS))
-    res.append(_run_one_metrics_only(df, backtest_support_resistance,  None, **SINGLE_PASS_DEFAULTS))
+    # pass **p (not defaults) so bbands / S‑R also honour max_entries, etc.
+    res.append(_run_one_metrics_only(df, backtest_bbands,             None, **p))
+    res.append(_run_one_metrics_only(df, backtest_support_resistance, None, **p))
     return res
+
+
+# ────────────────────────────────────────────────────────────────
+# Helper to hash a trade‑log deterministically
+# ────────────────────────────────────────────────────────────────
+def _hash_trades(trades: list[dict]) -> str:
+    return hashlib.sha1(json.dumps(trades, sort_keys=True).encode()).hexdigest()
 
 
 # ────────────────────────────────────────────────────────────────
@@ -171,11 +183,13 @@ def run_backtest_grid(ticker: str, days: str = "30d", interval: str = "5m", top_
             start=[]
         )
 
+    # sort once for deterministic ordering
     scenarios_metrics.sort(key=lambda s: (s["win_rate"], s["profit_factor"] or 0), reverse=True)
-    best_metrics = scenarios_metrics[:top_n]
 
-    # 2) full trade‑log pass
-    best_complete = []
+    # we'll keep walking this list until we collect top_n UNIQUE trade logs
+    best_complete: list[dict] = []
+    seen_hashes: set[str] = set()
+
     param_keys = (
         "open_range_minutes", "use_volume_filter", "use_vwap_filter",
         "stop_loss", "atr_stop_multiplier", "time_exit_minutes",
@@ -183,25 +197,60 @@ def run_backtest_grid(ticker: str, days: str = "30d", interval: str = "5m", top_
         "limit_same_direction", "max_entries",
     )
 
-    for s in best_metrics:
-        p = {k: s[k] for k in param_keys}
-        strat_func = {
+    def _scenario_to_func(name: str):
+        return {
             "backtest_orb":                backtest_orb,
             "backtest_reverse_orb":        backtest_reverse_orb,
             "backtest_bbands":             backtest_bbands,
             "backtest_support_resistance": backtest_support_resistance,
-        }[s["strategy"]]
+        }[name]
 
-        best_complete.append(
-            _run_one(df, strat_func, or_levels if "orb" in s["strategy"] else None, **p)
+    for s in scenarios_metrics:
+        if len(best_complete) == top_n:
+            break
+
+        p          = {k: s[k] for k in param_keys}
+        strat_func = _scenario_to_func(s["strategy"])
+
+        result = _run_one(
+            df,
+            strat_func,
+            or_levels if "orb" in s["strategy"] else None,
+            **p
         )
+
+        h = _hash_trades(result["daily_trades"])
+        if h in seen_hashes:
+            continue          # duplicate trade log → skip
+        seen_hashes.add(h)
+        best_complete.append(result)
 
     # Candle data for front‑end chart
     candles = (
-        df_raw
+        df
         .reset_index(names="timestamp")
-        .rename(columns={"open": "open", "high": "high",
-                         "low": "low", "close": "close", "volume": "volume"})
+        .rename(
+            columns={
+                "open":   "open",
+                "high":   "high",
+                "low":    "low",
+                "close":  "close",
+                "volume": "volume",
+                # keep BB_upper / BB_lower names as‑is
+            }
+        )
+        [
+            [
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "BB_upper",
+                "BB_lower",
+            ]
+        ]
     )
     candles["timestamp"] = candles["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 

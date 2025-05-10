@@ -1,11 +1,7 @@
-#orb_strategies.py
-
 from __future__ import annotations
 import numpy as np
 import pandas as pd
 from typing import Optional
-from .logging_config import logger
-
 
 # ───── helper indicators ───────────────────────────────────────
 def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -31,7 +27,7 @@ def compute_intraday_vwap(df: pd.DataFrame) -> pd.Series:
 # ───── core back‑test loop ────────────────────────────────────
 def _generic_orb_logic(
     df: pd.DataFrame,
-    or_levels: dict,
+    or_levels: dict | None,
     *,
     open_range_minutes: int,
     use_volume_filter: bool,
@@ -45,20 +41,35 @@ def _generic_orb_logic(
     max_entries: int,
     reverse: bool = False,
 ) -> pd.DataFrame:
+    """Main engine for ORB and Reverse‑ORB strategies.
+
+    Added DEBUG counters so you can see how often each optional
+    filter (volume, VWAP, opposite‑after‑loss) actually blocked trades.
+    """
     if df.empty:
         return pd.DataFrame()
 
     trades = []
 
     for day, session in df.groupby("trade_date"):
-        day_key = day.isoformat()  # matches key used in or_levels
+        day_key = day.isoformat()
 
-        if len(session) < 2 or day_key not in or_levels[open_range_minutes]:
+        # ─── daily counters for diagnostics ────────────────────
+        cnt = dict(vol_skip=0, vwap_block=0, opp_block=0)
+
+        if len(session) < 2 or (
+            or_levels is not None
+            and day_key not in or_levels[open_range_minutes]
+        ):
             continue
 
         bar_min  = int((session.index[1] - session.index[0]).seconds / 60)
         or_bars  = max(1, open_range_minutes // bar_min)
-        or_high, or_low = or_levels[open_range_minutes][day_key]
+        or_high, or_low = (
+            (np.nan, np.nan)
+            if or_levels is None
+            else or_levels[open_range_minutes][day_key]
+        )
 
         if pd.isna(or_high) or pd.isna(or_low):
             continue
@@ -67,6 +78,7 @@ def _generic_orb_logic(
         if use_volume_filter:
             vol_block = session.iloc[:or_bars]["volume"].sum()
             if vol_block <= session["volume"].mean():
+                cnt["vol_skip"] += 1
                 continue
 
         first_tradable_bar = session.index[or_bars] if len(session) > or_bars else None
@@ -74,8 +86,9 @@ def _generic_orb_logic(
         trade_open, trade_count = False, 0
         last_loss, last_dir     = False, None
 
-        for row in session.itertuples():
-            idx = row.Index
+        for i, row in enumerate(session.itertuples()):
+            idx       = row.Index
+            last_bar  = i == len(session) - 1
 
             # ───────── ENTRY ─────────
             if not trade_open and trade_count < max_entries:
@@ -89,15 +102,19 @@ def _generic_orb_logic(
                 if use_vwap_filter:
                     if cross_above and row.close < row.vwap:
                         cross_above = False
+                        cnt["vwap_block"] += 1
                     if cross_below and row.close > row.vwap:
                         cross_below = False
+                        cnt["vwap_block"] += 1
 
                 # don’t repeat same‑direction after loss
                 if limit_same_direction and last_loss:
                     if last_dir == "long":
                         cross_above = False
+                        cnt["opp_block"] += 1
                     if last_dir == "short":
                         cross_below = False
+                        cnt["opp_block"] += 1
 
                 direction = (
                     ("short" if reverse else "long")  if cross_above else
@@ -154,7 +171,7 @@ def _generic_orb_logic(
                     exit_px = row.close
 
                 # 6) end‑of‑session flush
-                if exit_px is None and idx == session.index[-1]:
+                if exit_px is None and last_bar:
                     exit_px = row.close
 
                 # ───── record trade ─────
