@@ -38,14 +38,14 @@ def backtest_bbands(
 
             # ───── ENTRY ─────
             if not trade_open and trade_count < max_entries:
-                if row.close < row.BB_lower:                 # LONG entry
+                if row.close <= row.BB_lower or row.open <= row.BB_lower:                 # LONG entry
                     direction = "long"
                     entry_px  = row.close
                     entry_t   = row.Index
                     trade_open = True
                     continue
 
-                if row.close > row.BB_upper:                 # SHORT entry
+                if row.close >= row.BB_upper or row.open >= row.BB_upper:                 # SHORT entry
                     direction = "short"
                     entry_px  = row.close
                     entry_t   = row.Index
@@ -57,8 +57,8 @@ def backtest_bbands(
                 exit_now = False
 
                 # Touch opposite band
-                if (direction == "long"  and row.high >= row.BB_upper) or \
-                   (direction == "short" and row.low  <= row.BB_lower):
+                if (direction == "long"  and (row.close >= row.BB_upper or row.open >= row.BB_upper)) or \
+                   (direction == "short" and (row.close  <= row.BB_lower or row.open <= row.BB_lower)):
                     exit_now = True
 
                 # Or flush on last bar of the day

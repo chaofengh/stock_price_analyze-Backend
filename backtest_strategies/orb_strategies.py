@@ -1,3 +1,4 @@
+#orb_strategies.py
 from __future__ import annotations
 import numpy as np
 import pandas as pd
@@ -135,8 +136,8 @@ def _generic_orb_logic(
 
                 # 1) Bollinger profit‑take
                 if use_bb_exit:
-                    if (direction == "short" and row.low  <= row.BB_lower) or \
-                       (direction == "long"  and row.high >= row.BB_upper):
+                    if (direction == "short" and (row.close  <= row.BB_lower or row.open <= row.BB_lower)) or \
+                       (direction == "long"  and (row.close >= row.BB_upper or row.open >= row.BB_upper)):
                         exit_px = row.close
 
                 # 2) S/R flip
