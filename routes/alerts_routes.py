@@ -1,68 +1,46 @@
-# alerts_routes.py
+#alerts_routes.py
 import json
 import time
-from datetime import datetime, timezone
-
-from flask import Blueprint, Response, request
-
+from flask import Blueprint, Response, jsonify, request
 import tasks.daily_scan_tasks as daily_scan_tasks
 from database.ticker_repository import get_all_tickers
 
-alerts_blueprint = Blueprint("alerts", __name__)
+alerts_blueprint = Blueprint('alerts', __name__)
 
-
-@alerts_blueprint.route("/api/alerts/stream", methods=["GET"])
+@alerts_blueprint.route('/api/alerts/stream', methods=['GET'])
 def alerts_stream():
-
-    # --- Parse & validate optional user_id ----------------------------------
-    user_id_param = request.args.get("user_id")
-    try:
-        user_id = int(user_id_param) if user_id_param else None
-    except ValueError:
-        user_id = None
+    # Get the optional user_id from query parameters
+    user_id = request.args.get("user_id")
+    if user_id:
+        try:
+            user_id = int(user_id)
+        except ValueError:
+            user_id = None
 
     def event_stream():
-        last_sent_date = None  # Track the day we've already pushed to client
-
+        last_known_date = None
         while True:
-            # -----------------------------------------------------------------
-            # 1) Ensure we have a scan for *today* (in UTC) --------------------
-            # -----------------------------------------------------------------
-            today = datetime.now(timezone.utc).date().isoformat()  # "YYYY‑MM‑DD"
+            if daily_scan_tasks.latest_scan_result:
 
-            latest = daily_scan_tasks.latest_scan_result
-            latest_day = (
-                latest["timestamp"].split(" ")[0]
-                if latest and "timestamp" in latest
-                else None
-            )
+                print("latest_scan_result:\n", daily_scan_tasks.latest_scan_result)
+                current_date = daily_scan_tasks.latest_scan_result["timestamp"].split(" ")[0]
+                if current_date != last_known_date:
+                    # Start with the global scan result.
+                    result = daily_scan_tasks.latest_scan_result.copy()
+                    
+                    # If user_id was provided, filter alerts based on the user's watchlist.
+                    if user_id is not None:
+                        # Get the tickers on the user's default list.
+                        user_watchlist = get_all_tickers(user_id=user_id)
+                        filtered_alerts = [
+                            alert for alert in result.get("alerts", [])
+                            if alert.get("ticker") in user_watchlist
+                        ]
+                        result["alerts"] = filtered_alerts
 
-            if latest_day != today:
-                # Either no scan yet or it's stale → run a fresh daily scan.
-                # daily_scan() updates latest_scan_result in‑place.
-                daily_scan_tasks.daily_scan_wrapper()
-                latest = daily_scan_tasks.latest_scan_result
-                latest_day = (
-                    latest["timestamp"].split(" ")[0]
-                    if latest and "timestamp" in latest
-                    else None
-                )
+                    data_str = json.dumps(result)
+                    yield f"data: {data_str}\n\n"
+                    last_known_date = current_date
+            time.sleep(3600)  # Sleep for 1 hour between checks.
+    return Response(event_stream(), mimetype='text/event-stream')
 
-            if latest and latest_day != last_sent_date:
-                payload = latest.copy()
-
-                # Filter by the user's watch‑list if a user_id was provided
-                if user_id is not None:
-                    watchlist = get_all_tickers(user_id=user_id)
-                    payload["alerts"] = [
-                        alert
-                        for alert in payload.get("alerts", [])
-                        if alert.get("ticker") in watchlist
-                    ]
-
-                yield f"data: {json.dumps(payload)}\n\n"  # SSE format
-                last_sent_date = latest_day
-
-            time.sleep(3600)  # Adjust if you need finer granularity
-
-    return Response(event_stream(), mimetype="text/event-stream")
