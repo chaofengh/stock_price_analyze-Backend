@@ -64,29 +64,37 @@ def get_summary(symbol: str) -> dict:
     peer_info = {}
     if peers:
         peer_data = fetch_stock_data(peers, period="1d", interval="5m")
+
         for peer_symbol in peers:
             df_peer = peer_data.get(peer_symbol, pd.DataFrame())
-            if not df_peer.empty:
-                # Get the first and last close of the day
-                first_close = df_peer.iloc[0]['close']
-                last_close = df_peer.iloc[-1]['close']
-                
-                # Calculate the percentage change if we have valid data
-                if first_close is not None and first_close != 0:
-                    pct_change = ((last_close - first_close) / first_close) * 100
-                else:
-                    pct_change = None
-                
-                peer_info[peer_symbol] = {
-                    'latest_price': last_close,
-                    'percentage_change': pct_change
-                }
-            else:
-                # No data for this peer
+            if df_peer.empty:
                 peer_info[peer_symbol] = {
                     'latest_price': None,
-                    'percentage_change': None
+                    'percentage_change': None,
+                    'intraday_close_5m': []          # still return an empty list
                 }
+                continue
+
+            # –– latest/percent-change as before ––
+            first_close = df_peer.iloc[0]['close']
+            last_close  = df_peer.iloc[-1]['close']
+            pct_change  = ((last_close - first_close) / first_close) * 100 if first_close else None
+
+            # –– NEW: full 5-min close series ––
+            intraday_close_5m = []
+            for idx, price in df_peer['close'].items():
+                # try to treat idx as a datetime; if that fails we leave it as a str/int
+                try:
+                    ts_str = pd.to_datetime(idx).isoformat()
+                except (ValueError, TypeError, AttributeError):
+                    ts_str = str(idx)
+                intraday_close_5m.append({'timestamp': ts_str, 'close': float(price)})
+
+            peer_info[peer_symbol] = {
+                'latest_price': last_close,
+                'percentage_change': pct_change,
+                'intraday_close_5m': intraday_close_5m
+            }
 
     # 8. Fetch financial statement data (only income statement in this case)
     try:
@@ -162,7 +170,7 @@ def get_summary(symbol: str) -> dict:
         'income_statement': income_statement,
 
         # Include the new peer info with latest price and daily percentage change:
-        'peer_latest_data': peer_info
+        'peer_info': peer_info
     }
 
     return summary
