@@ -33,11 +33,13 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
 
       # 5) Install *pinned* NumPy + ta-lib first, then the rest
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
-          # --- critical pin for TA-Lib compile ---
-          python -m pip install "numpy<2.0" "ta-lib==0.4.28"
-          # ---------------------------------------
+          # Pin NumPy 1.26 first
+          python -m pip install "numpy<2.0"
+          # Build ta-lib against that same NumPy and the Homebrew C library
+          python -m pip install "ta-lib==0.4.28" --no-build-isolation --no-binary ta-lib
+          # Everything else (won't touch NumPy now)
           pip install -r requirements.txt
           pip install pytest
 
