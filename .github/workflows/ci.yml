@@ -2,38 +2,49 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   build:
     runs-on: macos-latest
 
     steps:
-      # 1) Check out the repo
-      - name: Check out code
-        uses: actions/checkout@v3
+    # 1 – check out repo
+    - uses: actions/checkout@v3
 
-      # 2) Set up Python 3.12
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.12'
+    # 2 – Python 3.12
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
 
-      # 3) Install system packages (TA-Lib C lib + PostgreSQL client)
-      - name: Install system dependencies
-        run: |
-          brew update
-          brew install postgresql ta-lib
+    # 3 – C-level deps (TA-Lib + PostgreSQL for psycopg2-binary tests)
+    - name: Install system packages
+      run: |
+        brew update
+        brew install postgresql ta-lib
 
-      # 4) Install Python dependencies
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt                       # pinned packages
-          pip install -e .[test] || true                        # optional: extras defined in pyproject
+    # 4 – Python deps
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
 
-      # 5) Run test suite
-      - name: Run tests
-        run: python -m pytest
+        # ---- critical pin ----
+        # Build everything against NumPy 1.26 (latest 1.x series);
+        # this avoids the missing-macro errors with NumPy 2.
+        python -m pip install "numpy>=1.26,<2.0"
+
+        # Build ta-lib *from source* against that NumPy
+        python -m pip install --no-binary=ta-lib ta-lib==0.6.4
+
+        # Now the rest of your stack (skip ta-lib / numpy duplicates)
+        python -m pip install -r requirements.txt \
+                             --constraint <(echo "numpy<2" && echo "ta-lib==0.6.4")
+
+        # optional test extras in pyproject.toml
+        python -m pip install -e .[test]
+
+    # 5 – run tests
+    - name: Run tests
+      run: python -m pytest
