@@ -35,11 +35,21 @@ jobs:
       # 5) Install *pinned* NumPy + ta-lib first, then the rest
       - name: Install Python dependencies
         run: |
-          # Pin NumPy 1.26 first
+          # 1. NumPy that ta-lib understands
           python -m pip install "numpy<2.0"
-          # Build ta-lib against that same NumPy and the Homebrew C library
-          python -m pip install "ta-lib==0.4.28" --no-build-isolation --no-binary ta-lib
-          # Everything else (won't touch NumPy now)
+
+          # 2. Compiler/linker flags for ta-lib
+          BREW_PREFIX=$(brew --prefix)
+          export CPPFLAGS="-I${BREW_PREFIX}/opt/ta-lib/include"
+          export LDFLAGS="-L${BREW_PREFIX}/opt/ta-lib/lib"
+          export PKG_CONFIG_PATH="${BREW_PREFIX}/opt/ta-lib/lib/pkgconfig"
+          # Build for the runner’s architecture only (avoids missing x86_64 slice)
+          export ARCHFLAGS="-arch $(uname -m)"
+
+          # 3. Build ta-lib against those flags, *without* isolation
+          python -m pip install --no-build-isolation --no-binary ta-lib "ta-lib==0.4.28"
+
+          # 4. The rest of your requirements (won’t touch NumPy now)
           pip install -r requirements.txt
           pip install pytest
 
