@@ -11,7 +11,7 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      # 1) Check out the code
+      # 1) Check out the repo
       - name: Check out code
         uses: actions/checkout@v3
 
@@ -19,41 +19,21 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.12.0'
+          python-version: '3.12'
 
-      # 3) Install system prerequisites via Homebrew on macOS
-      - name: Install system prerequisites
+      # 3) Install system packages (TA-Lib C lib + PostgreSQL client)
+      - name: Install system dependencies
         run: |
           brew update
-          brew install wget postgresql ta-lib autoconf automake libtool
+          brew install postgresql ta-lib
 
-      # 4) Upgrade pip, setuptools, wheel
-      - name: Upgrade pip, setuptools, wheel
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
-
-      # 5) Install *pinned* NumPy + ta-lib first, then the rest
+      # 4) Install Python dependencies
       - name: Install Python dependencies
         run: |
-          # 1. NumPy that ta-lib understands
-          python -m pip install "numpy<2.0"
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt                       # pinned packages
+          pip install -e .[test] || true                        # optional: extras defined in pyproject
 
-          # 2. Compiler/linker flags for ta-lib
-          BREW_PREFIX=$(brew --prefix)
-          export CPPFLAGS="-I${BREW_PREFIX}/opt/ta-lib/include"
-          export LDFLAGS="-L${BREW_PREFIX}/opt/ta-lib/lib"
-          export PKG_CONFIG_PATH="${BREW_PREFIX}/opt/ta-lib/lib/pkgconfig"
-          # Build for the runner’s architecture only (avoids missing x86_64 slice)
-          export ARCHFLAGS="-arch $(uname -m)"
-
-          # 3. Build ta-lib against those flags, *without* isolation
-          python -m pip install --no-build-isolation --no-binary ta-lib "ta-lib==0.4.28"
-
-          # 4. The rest of your requirements (won’t touch NumPy now)
-          pip install -r requirements.txt
-          pip install pytest
-
-      # 6) Run tests
+      # 5) Run test suite
       - name: Run tests
-        run: |
-          python -m pytest
+        run: python -m pytest
