@@ -1,39 +1,45 @@
+# ────────────────────────────────────────────────────────────────
+# Build system
+# ────────────────────────────────────────────────────────────────
 [build-system]
-# Requires setuptools 61+ to read metadata from pyproject.toml
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=69.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
+# ────────────────────────────────────────────────────────────────
+# Project metadata
+# ────────────────────────────────────────────────────────────────
 [project]
-name = "stock_price_analyze_backend"
-version = "0.1.0"
-description = "A backend for stock price analysis"
-authors = [
-  { name = "Your Name", email = "you@example.com" }
-]
-readme = "README.md"
-requires-python = ">=3.8"
+name            = "stock_price_analyze_backend"
+version         = "0.1.0"
+description     = "A backend for stock price analysis"
+readme          = "README.md"
+requires-python = ">=3.9"
 
-# List your dependencies here:
+authors = [
+  {name = "Your Name", email = "you@example.com"}
+]
+
+# Core runtime dependencies
 dependencies = [
   "pandas>=1.0",
-  "numpy>=1.20",
+  "numpy>=1.26,<2.0",   # stays on 1.x for ta-lib compatibility
+  "ta-lib==0.6.4",
   "requests>=2.25",
-  "sqlalchemy>=1.4",
-  # e.g. "fastapi>=0.95",
-  # Add others if needed
+  "sqlalchemy>=1.4"
 ]
 
-# Optional: extra dependencies for testing/development
+# Optional extras (e.g. `pip install .[test]`)
 [project.optional-dependencies]
 test = [
   "pytest>=7.0",
-  "pytest-cov>=4.0",
-  # Add other test libs here
+  "pytest-cov>=4.0"
 ]
 
-# Tell setuptools how to find your package directories
+# ────────────────────────────────────────────────────────────────
+# Package discovery (new setuptools ≥69 schema)
+# ────────────────────────────────────────────────────────────────
 [tool.setuptools.packages.find]
-where = "."
+where   = ["."]
 include = [
   "analysis*",
   "database*",
@@ -49,6 +55,6 @@ exclude = [
   ".pytest_cache*"
 ]
 
-# Also treat the top-level "app.py" as a Python module named "app"
+# Treat the top-level app.py as an importable module named “app”
 [tool.setuptools]
 py-modules = ["app"]
