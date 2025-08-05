@@ -32,7 +32,7 @@ MarkupSafe==3.0.2
 multidict==6.1.0
 multitasking==0.0.11
 numba==0.61.2
-numpy==2.2.1
+numpy>=1.26,<2.0
 packaging==24.2
 pandas==2.2.3
 pandas_market_calendars==5.0.0
