@@ -5,9 +5,10 @@ import pytz
 
 from analysis.daily_scan import daily_scan
 
-# Module-level cache + lock
+# Module-level cache + lock + update event
 latest_scan_result = None
 _result_lock = threading.Lock()
+scan_updated_evt = threading.Event()   # <- signals SSE when a new scan is ready
 
 # Scheduling policy (keep in sync with app.py cron)
 _CHICAGO_TZ = pytz.timezone("America/Chicago")
@@ -34,6 +35,11 @@ def _is_past_run_window(now: datetime) -> bool:
         return False
     return now.time() >= _RUN_TIME
 
+def get_last_timestamp() -> str | None:
+    """Return the cached 'timestamp' (as-of market close) if available."""
+    r = latest_scan_result
+    return (r.get("timestamp") if r else None) if isinstance(r, dict) else None
+
 def get_latest_scan_result(
     force: bool = False,
     allow_refresh_if_due: bool = True,
@@ -45,8 +51,7 @@ def get_latest_scan_result(
     - Else if cache is from today (Chicago): return it.
     - Else if `allow_refresh_if_due` AND we are past today's run window (>= 16:02 CT on a weekday):
         recompute and return.
-    - Else: return whatever we have (stale cache) WITHOUT recomputing.
-      (Prevents midnight / first-visit recomputes.)
+    - Else: return whatever we have WITHOUT recomputing.
     """
     global latest_scan_result
 
@@ -62,25 +67,23 @@ def get_latest_scan_result(
                 return latest_scan_result
 
             if allow_refresh_if_due and _is_past_run_window(_now_chi()):
-                # It's time (or later) to produce today's scan -> recompute now.
                 latest_scan_result = daily_scan()
+                scan_updated_evt.set()   # notify listeners
                 return latest_scan_result
 
-            # Not time yet. If we have something cached, return it.
             if latest_scan_result is not None:
                 return latest_scan_result
 
-            # Nothing cached (e.g., first boot). Produce one so UI has data.
+            # No cache yet (first boot) – produce once so UI has data.
             latest_scan_result = daily_scan()
+            scan_updated_evt.set()
             return latest_scan_result
 
         # force=True
         latest_scan_result = daily_scan()
+        scan_updated_evt.set()
         return latest_scan_result
 
-# Backwards-compat function name you already used elsewhere
 def daily_scan_wrapper():
-    """
-    Force-run daily_scan and update the cache. Used by the scheduler.
-    """
+    """Force-run daily_scan and update the cache. Used by the scheduler."""
     return get_latest_scan_result(force=True)
