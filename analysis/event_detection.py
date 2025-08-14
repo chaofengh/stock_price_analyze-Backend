@@ -10,23 +10,39 @@ def process_bollinger_touches(data, mode='alert'):
       - Expects data as a dict {symbol: DataFrame}.
       - Checks the latest row for each symbol.
       - Returns a list of alert dictionaries including:
-            "symbol", "close_price", "bb_upper", "bb_lower", "touched_side", "recent_closes".
+            "symbol", "close_price", "bb_upper", "bb_lower", "touched_side",
+            "recent_closes", "recent_bb_upper", "recent_bb_lower".
     
     For mode 'historical':
       - Expects data as a DataFrame for a single ticker.
       - Iterates over all rows and returns a list of touch events with:
             "date", "index", "band" (either 'upper' or 'lower'), and "price".
     """
+    def _tolist_30(series):
+        # Convert to a Python list of length <= 30 with floats/None (no NaNs)
+        out = []
+        for v in series.tail(30).tolist():
+            if v is None or v != v:   # handles None and NaN (NaN != NaN)
+                out.append(None)
+            else:
+                try:
+                    out.append(float(v))
+                except (TypeError, ValueError):
+                    out.append(None)
+        return out
+
     results = []
     
     if mode == 'alert':
         # data is a dict of {symbol: DataFrame}
         for symbol, df in data.items():
-            if df.empty:
+            if df is None or df.empty:
                 continue
+
             last_row = df.iloc[-1]
             required_fields = ['close', 'BB_upper', 'BB_lower', 'high', 'low']
-            if any(last_row[field] is None for field in required_fields):
+            # Robust check for missing/NaN values
+            if any((last_row.get(f) is None) or (last_row.get(f) != last_row.get(f)) for f in required_fields):
                 continue
 
             touched_side = None
@@ -41,10 +57,13 @@ def process_bollinger_touches(data, mode='alert'):
                     "close_price": float(last_row['close']),
                     "bb_upper": float(last_row['BB_upper']),
                     "bb_lower": float(last_row['BB_lower']),
-                    'low_price': float(last_row['low']),
-                    'high_price': float(last_row['high']),
+                    "low_price": float(last_row['low']),
+                    "high_price": float(last_row['high']),
                     "touched_side": touched_side,
-                    "recent_closes": df['close'].tail(30).tolist()
+                    # For charting (aligned, JSON-safe lists)
+                    "recent_closes": _tolist_30(df['close']),
+                    "recent_bb_upper": _tolist_30(df['BB_upper']),
+                    "recent_bb_lower": _tolist_30(df['BB_lower']),
                 })
                 
     elif mode == 'historical':
@@ -53,7 +72,7 @@ def process_bollinger_touches(data, mode='alert'):
         for i in range(n):
             row = data.iloc[i]
             required_fields = ['date', 'close', 'BB_upper', 'BB_lower', 'high', 'low']
-            if any(row[field] is None for field in required_fields):
+            if any((row.get(f) is None) or (row.get(f) != row.get(f)) for f in required_fields):
                 continue
             if row['high'] >= row['BB_upper']:
                 results.append({
@@ -70,6 +89,7 @@ def process_bollinger_touches(data, mode='alert'):
                     "price": float(row['close'])
                 })
     return results
+
 
 
 def detect_hug_events(
