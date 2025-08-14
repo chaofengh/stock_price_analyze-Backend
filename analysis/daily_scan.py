@@ -1,3 +1,4 @@
+# analysis/daily_scan.py
 from datetime import datetime
 import pytz
 
@@ -28,7 +29,3 @@ def daily_scan():
         "timestamp": timestamp,
         "alerts": touched_details or [],
     }
-
-if __name__ == "__main__":
-    # For quick local testing
-    print(daily_scan())

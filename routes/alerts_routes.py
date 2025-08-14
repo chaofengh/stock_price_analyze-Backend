@@ -1,5 +1,8 @@
+# routes/alerts_routes.py
 import json
+import time
 from flask import Blueprint, Response, jsonify, request
+
 from tasks.daily_scan_tasks import get_latest_scan_result
 from database.ticker_repository import get_all_tickers
 
@@ -26,9 +29,11 @@ def _filter_for_user(result: dict, user_id: int | None) -> dict:
 @alerts_blueprint.route('/api/alerts/latest', methods=['GET'])
 def alerts_latest():
     """
-    Simple JSON endpoint:
-      - If cache is missing/stale (not today's date in America/Chicago), recompute.
-      - Return the (possibly newly computed) result, optionally filtered by user_id watchlist.
+    JSON endpoint:
+      - Returns the cached result.
+      - If it's past today's run window (>= 16:02 CT on a weekday), a fresh
+        computation will occur transparently before returning.
+      - Importantly: will NOT recompute at midnight just because the date changed.
     """
     user_id = request.args.get("user_id")
     try:
@@ -36,7 +41,7 @@ def alerts_latest():
     except ValueError:
         user_id = None
 
-    result = get_latest_scan_result()  # will compute if stale
+    result = get_latest_scan_result(allow_refresh_if_due=True)
     result = _filter_for_user(result, user_id)
     return jsonify(result), 200
 
@@ -44,8 +49,9 @@ def alerts_latest():
 def alerts_stream():
     """
     SSE endpoint:
-      - Immediately sends the current (or freshly computed) result when the client connects.
-      - Then checks once per hour and only sends again if the calendar day flips.
+      - Sends the current cached result immediately on connect.
+      - Then checks frequently and sends again when the *timestamp* changes.
+      - Emits keep-alive heartbeats to avoid proxy disconnects.
     """
     user_id = request.args.get("user_id")
     try:
@@ -54,24 +60,30 @@ def alerts_stream():
         user_id = None
 
     def event_stream():
-        import time
-        last_sent_date = None
+        last_sent_ts = None
+        idle = 0
         while True:
-            result = get_latest_scan_result()  # compute if stale
-            current_date = (result.get("timestamp") or "")[:10]
+            # This will compute only if it's past the run window; otherwise returns cache.
+            result = get_latest_scan_result(allow_refresh_if_due=True)
+            ts = result.get("timestamp") or ""
 
-            # Send immediately on first loop, then only if the date changes.
-            if current_date != last_sent_date:
+            if ts and ts != last_sent_ts:
                 payload = _filter_for_user(result, user_id)
-                data_str = json.dumps(payload)
-                yield f"data: {data_str}\n\n"
-                last_sent_date = current_date
+                yield "event: alerts_update\n"
+                yield f"data: {json.dumps(payload)}\n\n"
+                last_sent_ts = ts
+                idle = 0
+            else:
+                # Keep-alive every 30s
+                if idle % 30 == 0:
+                    yield f": heartbeat {int(time.time())}\n\n"
 
-            # Sleep an hour; adjust if you want tighter checks
-            time.sleep(3600)
+            time.sleep(60*60)
+            idle += 1
 
     headers = {
         "Cache-Control": "no-cache",
-        "X-Accel-Buffering": "no",  # helpful with some proxies
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
     }
     return Response(event_stream(), mimetype='text/event-stream', headers=headers)
