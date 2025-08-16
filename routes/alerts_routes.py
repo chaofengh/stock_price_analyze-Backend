@@ -13,7 +13,6 @@ from database.ticker_repository import get_all_tickers
 alerts_blueprint = Blueprint('alerts', __name__)
 
 def _filter_for_user(result: dict, user_id: int | None) -> dict:
-    """Return a shallow-copied result with alerts filtered by the user's watchlist (if user_id provided)."""
     if user_id is None:
         return result
     try:
@@ -22,19 +21,17 @@ def _filter_for_user(result: dict, user_id: int | None) -> dict:
         return result  # fail open
 
     filtered = result.copy()
-    filtered_alerts = [
+    filtered["alerts"] = [
         a for a in (result.get("alerts") or [])
         if a.get("ticker") in watchlist
     ]
-    filtered["alerts"] = filtered_alerts
     return filtered
 
 @alerts_blueprint.route('/api/alerts/latest', methods=['GET'])
 def alerts_latest():
     """
-    JSON endpoint:
-      - Returns cached result.
-      - Recomputes only after 16:02 CT on weekdays (or when the scheduler runs).
+    Returns cached result.
+    Recomputes only after 16:02 CT on weekdays (or when the scheduler runs).
     """
     user_id = request.args.get("user_id")
     try:
@@ -49,10 +46,7 @@ def alerts_latest():
 @alerts_blueprint.route('/api/alerts/stream', methods=['GET'])
 def alerts_stream():
     """
-    SSE endpoint (event-driven, low CPU):
-      - Sends the current cached result immediately on connect.
-      - Then blocks on an Event and only sends again when the scan updates.
-      - Sends a heartbeat comment every 30s to keep the connection alive.
+    SSE endpoint (event-driven, low CPU).
     """
     user_id = request.args.get("user_id")
     try:
@@ -61,31 +55,27 @@ def alerts_stream():
         user_id = None
 
     def event_stream():
-        # Send current state once
         cur = get_latest_scan_result(allow_refresh_if_due=True)
         cur = _filter_for_user(cur, user_id)
         last_ts = cur.get("timestamp") or ""
         yield "event: alerts_update\n"
         yield f"data: {json.dumps(cur)}\n\n"
 
-        # Then wait for real updates
         while True:
             fired = scan_updated_evt.wait(timeout=30)
             if not fired:
-                # heartbeat
                 yield f": heartbeat {int(time.time())}\n\n"
                 continue
 
-            # Clear the event and check if timestamp really changed
             scan_updated_evt.clear()
             ts = get_last_timestamp() or ""
             if ts and ts != last_ts:
-                # Read without triggering recompute (it already happened)
-                payload = _filter_for_user(get_latest_scan_result(allow_refresh_if_due=False), user_id)
+                payload = _filter_for_user(
+                    get_latest_scan_result(allow_refresh_if_due=False), user_id
+                )
                 yield "event: alerts_update\n"
                 yield f"data: {json.dumps(payload)}\n\n"
                 last_ts = ts
-            # else: spurious/duplicate set — ignore
 
     headers = {
         "Cache-Control": "no-cache",
