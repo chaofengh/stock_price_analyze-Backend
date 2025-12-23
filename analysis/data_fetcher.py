@@ -1,5 +1,8 @@
 #analysis.data_fetcher.py
 import os
+from collections import defaultdict
+from decimal import Decimal, InvalidOperation
+
 import pandas as pd
 from alpha_vantage.timeseries import TimeSeries
 import yfinance as yf
@@ -357,13 +360,135 @@ def fetch_financials(symbol: str, statements=None) -> dict:
                 reverse=True
             )[:3]
         
-        # Filter and sort quarterlyReports to keep only the last eight entries.
+        # Filter and sort quarterlyReports to keep only the last twelve entries.
         if "quarterlyReports" in data:
             data["quarterlyReports"] = sorted(
                 data["quarterlyReports"],
                 key=lambda x: x.get("fiscalDateEnding", ""),
                 reverse=True
-            )[:8]
-        
+            )[:12]
+
+            partial_year = _compute_partial_year_reports(data["quarterlyReports"])
+            if partial_year:
+                data["partialYearReports"] = partial_year
+
+        data["symbol"] = symbol
         financials[statement] = data
     return financials
+
+
+def _compute_partial_year_reports(quarterly_reports):
+    """Builds year-to-date style aggregates for the latest year and two prior years."""
+    if not quarterly_reports:
+        return []
+
+    reports_with_dates = [
+        rpt for rpt in quarterly_reports if rpt.get("fiscalDateEnding")
+    ]
+    if not reports_with_dates:
+        return []
+
+    latest_report = max(reports_with_dates, key=lambda r: r["fiscalDateEnding"])
+    latest_date = latest_report.get("fiscalDateEnding", "")
+    if len(latest_date) < 7:
+        return []
+
+    latest_year = latest_date[:4]
+    latest_month = latest_date[5:7]
+    latest_quarter = _month_to_quarter(latest_month)
+    if latest_quarter is None or latest_quarter == 0:
+        return []
+
+    # Organize reports by year and quarter for quick lookups
+    reports_by_year = defaultdict(dict)
+    for report in quarterly_reports:
+        date_str = report.get("fiscalDateEnding")
+        if not date_str or len(date_str) < 7:
+            continue
+        year = date_str[:4]
+        quarter = _month_to_quarter(date_str[5:7])
+        if quarter is None:
+            continue
+        reports_by_year[year][quarter] = report
+
+    years_to_build = [str(int(latest_year) - offset) for offset in range(3)]
+    partial_sets = []
+
+    for year in years_to_build:
+        year_reports = reports_by_year.get(year)
+        if not year_reports:
+            continue
+
+        selected = []
+        for quarter in range(1, latest_quarter + 1):
+            quarter_report = year_reports.get(quarter)
+            if not quarter_report:
+                selected = []
+                break
+            selected.append(quarter_report)
+
+        if not selected:
+            continue
+
+        aggregated = _aggregate_quarter_reports(selected)
+        aggregated["fiscalDateEnding"] = f"{year}-YTD-Q{latest_quarter}"
+        aggregated["quarterRange"] = f"Q1-Q{latest_quarter}"
+        aggregated["quarterCount"] = latest_quarter
+        aggregated["quartersIncluded"] = [f"Q{i}" for i in range(1, latest_quarter + 1)]
+        aggregated["year"] = year
+        partial_sets.append(aggregated)
+
+    # Return in chronological order (oldest first)
+    return sorted(partial_sets, key=lambda x: x["year"])
+
+
+def _aggregate_quarter_reports(reports):
+    totals = {}
+    currency = None
+
+    for report in reports:
+        if not currency:
+            currency = report.get("reportedCurrency")
+        for key, value in report.items():
+            if key in {"fiscalDateEnding", "reportedCurrency"}:
+                continue
+            numeric_value = _safe_decimal(value)
+            if numeric_value is None:
+                continue
+            totals[key] = totals.get(key, Decimal("0")) + numeric_value
+
+    aggregated = {key: _decimal_to_string(val) for key, val in totals.items()}
+    if currency:
+        aggregated["reportedCurrency"] = currency
+    return aggregated
+
+
+def _month_to_quarter(month_str):
+    try:
+        month = int(month_str)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= month <= 3:
+        return 1
+    if 4 <= month <= 6:
+        return 2
+    if 7 <= month <= 9:
+        return 3
+    if 10 <= month <= 12:
+        return 4
+    return None
+
+
+def _safe_decimal(value):
+    if value in (None, "", "None"):
+        return Decimal("0")
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _decimal_to_string(value):
+    if value == value.to_integral():
+        return str(int(value))
+    return format(value, "f")

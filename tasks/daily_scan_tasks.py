@@ -12,7 +12,7 @@ scan_updated_evt = threading.Event()   # signals SSE when a new scan is ready
 
 # Scheduling policy (keep in sync with app.py cron)
 _CHICAGO_TZ = pytz.timezone("America/Chicago")
-_RUN_TIME = dtime(hour=16, minute=2)       # 16:02 CT
+_RUN_TIME = dtime(hour=13, minute=31)       # 16:02 CT
 _RUN_WEEKDAYS = {0, 1, 2, 3, 4}            # Mon=0 ... Fri=4
 
 def _today_str_chicago() -> str:
