@@ -244,7 +244,19 @@ def fetch_stock_fundamentals(symbol):
     # Extract basic metrics
     trailing_pe = safe_float("trailingPE")
     forward_pe = safe_float("forwardPE")
+    trailing_eps = safe_float("trailingEps")
+    forward_eps = safe_float("forwardEps")
     earnings_growth = safe_float("earningsGrowth")  # Expected as a decimal (e.g., 0.15 for 15%)
+    current_price = (
+        safe_float("currentPrice")
+        or safe_float("regularMarketPrice")
+        or safe_float("previousClose")
+    )
+
+    if trailing_pe is None and trailing_eps is not None and current_price:
+        trailing_pe = current_price / trailing_eps
+    if forward_pe is None and forward_eps is not None and current_price:
+        forward_pe = current_price / forward_eps
 
     # Compute PEG: forwardPE divided by (earningsGrowth * 100)
     if forward_pe is not None and earnings_growth is not None and earnings_growth != 0:
@@ -263,9 +275,12 @@ def fetch_stock_fundamentals(symbol):
     dividendYield  = safe_float("dividendYield")
     beta           = safe_float("beta")
     marketCap      = safe_float("marketCap")
+    shares_outstanding = safe_float("sharesOutstanding")
+    if marketCap is None and current_price and shares_outstanding:
+        marketCap = current_price * shares_outstanding
     priceToBook    = safe_float("priceToBook")
-    forwardEPS     = safe_float("forwardEps")
-    trailingEPS    = safe_float("trailingEps")
+    forwardEPS     = forward_eps
+    trailingEPS    = trailing_eps
     debtToEquity   = safe_float("debtToEquity")
 
     return {

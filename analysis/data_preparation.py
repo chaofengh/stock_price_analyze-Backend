@@ -3,17 +3,18 @@ import pandas as pd
 from .data_fetcher import fetch_stock_data
 from .indicators import compute_bollinger_bands, compute_rsi
 
-def prepare_stock_data(symbols):
+def prepare_stock_data(symbols, include_rsi: bool = True):
     """
-    Fetches data for multiple symbols, theclear
-    n computes Bollinger Bands & RSI.
+    Fetches data for multiple symbols, then computes Bollinger Bands.
+    RSI is optional for callers that need it.
     Returns a dictionary of DataFrames keyed by symbol.
     """
     data_dict = fetch_stock_data(symbols)
 
     for symbol, df in data_dict.items():
         df = compute_bollinger_bands(df)
-        df = compute_rsi(df)
+        if include_rsi:
+            df = compute_rsi(df)
         data_dict[symbol] = df
 
     return data_dict

@@ -36,7 +36,7 @@ def create_default_user_list(user_id):
     """
     # Define the default tickers you want every new user to have.
     default_tickers = [
-        "TSLA", "PLTR", "NFLX", "AMD", "MU", "CRWD", "SHOP", "DFS", "META", "GS",
+        "TSLA", "PLTR", "NFLX", "AMD", "MU", "CRWD", "SHOP", "META", "GS",
         "NVDA", "PYPL", "SPOT", "ABNB", "CRM", "UBER", "ZM", "TGT", "ADBE", "AMZN",
         "HD", "PINS", "AAPL", "BBY", "V", "COST", "WMT", "MSFT", "DIS", "SBUX",
         "JPM", "LULU", "MCD", "T", "QQQ", "XYZ", "TQQQ", "NVDL", "SSO"

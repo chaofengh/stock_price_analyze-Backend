@@ -1,8 +1,10 @@
 # event_detection_analysis.py
 from .event_detection import process_bollinger_touches, detect_hug_events, find_short_term_high, find_short_term_low
 
-def get_touch_and_hug_events(data):
-    touches = process_bollinger_touches(data,mode='historical')
+def get_touch_and_hug_events(data, include_hugs: bool = True):
+    touches = process_bollinger_touches(data, mode='historical')
+    if not include_hugs:
+        return touches, [], []
     hug_events_upper, hug_events_lower = detect_hug_events(data, touches)
 
     return touches, hug_events_upper, hug_events_lower
