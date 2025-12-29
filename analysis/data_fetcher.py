@@ -10,12 +10,92 @@ import finnhub
 import requests
 from dotenv import load_dotenv
 import numpy as np
+from utils.ttl_cache import TTLCache
 load_dotenv()
 
 alpha_vantage_api_key = os.environ.get("alpha_vantage_api_key")
 finnhub_api_key = os.environ.get("finnhub_api_key")
 finnhub_client = finnhub.Client(api_key=finnhub_api_key)
 
+_FINANCIALS_CACHE = TTLCache(ttl_seconds=60 * 60 * 6, max_size=512)
+_FINANCIALS_EMPTY_CACHE = TTLCache(ttl_seconds=60 * 5, max_size=512)
+_NO_DATA = object()
+
+
+def _normalize_symbol(symbol: str) -> str:
+    return symbol.strip().upper() if symbol else ""
+
+
+def _is_alpha_vantage_error(payload) -> bool:
+    if not isinstance(payload, dict):
+        return True
+    return any(key in payload for key in ("Note", "Error Message", "Information"))
+
+
+def _has_financial_reports(payload) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    annual = payload.get("annualReports") or []
+    quarterly = payload.get("quarterlyReports") or []
+    partial = payload.get("partialYearReports") or []
+    return bool(annual or quarterly or partial)
+
+
+def _normalize_line_name(name) -> str:
+    if name is None:
+        return ""
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+_YF_INCOME_MAP = {
+    "totalrevenue": "totalRevenue",
+    "grossprofit": "grossProfit",
+    "operatingincome": "operatingIncome",
+    "operatingincomeloss": "operatingIncome",
+    "operatingexpense": "operatingExpenses",
+    "operatingexpenses": "operatingExpenses",
+    "researchdevelopment": "researchAndDevelopment",
+    "researchanddevelopment": "researchAndDevelopment",
+    "researchdevelopmentexpense": "researchAndDevelopment",
+    "researchanddevelopmentexpense": "researchAndDevelopment",
+    "netincome": "netIncome",
+    "netincomeloss": "netIncome",
+}
+
+
+def _build_income_annual_from_yfinance(symbol: str) -> list:
+    try:
+        ticker = yf.Ticker(symbol)
+        financials = ticker.financials
+    except Exception:
+        return []
+
+    if financials is None or getattr(financials, "empty", True):
+        return []
+
+    reports = []
+    for col in financials.columns:
+        if hasattr(col, "strftime"):
+            fiscal_date = col.strftime("%Y-%m-%d")
+        else:
+            fiscal_date = str(col)
+
+        report = {"fiscalDateEnding": fiscal_date}
+        for idx, value in financials[col].items():
+            key = _YF_INCOME_MAP.get(_normalize_line_name(idx))
+            if not key:
+                continue
+            if value is None or pd.isna(value):
+                continue
+            numeric_value = _safe_decimal(value)
+            if numeric_value is None:
+                continue
+            report[key] = _decimal_to_string(numeric_value)
+
+        if len(report) > 1:
+            reports.append(report)
+
+    return sorted(reports, key=lambda r: r.get("fiscalDateEnding", ""), reverse=True)
 
 
 def fetch_stock_data(symbols, period="4mo", interval="1d"):
@@ -333,6 +413,8 @@ def fetch_financials(symbol: str, statements=None) -> dict:
     """
     if not alpha_vantage_api_key:
         raise ValueError("Missing 'alpha_vantage_api_key' in environment")
+
+    symbol = _normalize_symbol(symbol)
     
     # Mapping from our statement keys to the Alpha Vantage API function names.
     valid_types = {
@@ -360,34 +442,76 @@ def fetch_financials(symbol: str, statements=None) -> dict:
     
     financials = {}
     for statement in requested_types:
+        cache_key = (symbol, statement)
+        cached = _FINANCIALS_CACHE.get(cache_key, _NO_DATA)
+        if cached is not _NO_DATA:
+            financials[statement] = cached
+            continue
+        cached_empty = _FINANCIALS_EMPTY_CACHE.get(cache_key, _NO_DATA)
+        if cached_empty is not _NO_DATA:
+            financials[statement] = cached_empty
+            continue
+
         function_name = valid_types[statement]
         url = f"https://www.alphavantage.co/query?function={function_name}&symbol={symbol}&apikey={alpha_vantage_api_key}"
-        response = requests.get(url)
-        if response.status_code != 200:
-            raise Exception(f"Error fetching {statement} data: {response.status_code}")
-        data = response.json()
+        try:
+            response = requests.get(url, timeout=8)
+            if response.status_code != 200:
+                raise Exception(f"Error fetching {statement} data: {response.status_code}")
+            data = response.json()
+        except Exception:
+            if statement == "income_statement":
+                data = {}
+            else:
+                raise
+        if not isinstance(data, dict):
+            data = {}
         
         # Filter and sort annualReports to keep only the last three entries.
         if "annualReports" in data:
-            data["annualReports"] = sorted(
-                data["annualReports"],
-                key=lambda x: x.get("fiscalDateEnding", ""),
-                reverse=True
-            )[:3]
+            if isinstance(data["annualReports"], list):
+                data["annualReports"] = sorted(
+                    data["annualReports"],
+                    key=lambda x: x.get("fiscalDateEnding", ""),
+                    reverse=True
+                )[:3]
+            else:
+                data["annualReports"] = []
         
         # Filter and sort quarterlyReports to keep only the last twelve entries.
         if "quarterlyReports" in data:
-            data["quarterlyReports"] = sorted(
-                data["quarterlyReports"],
-                key=lambda x: x.get("fiscalDateEnding", ""),
-                reverse=True
-            )[:12]
+            if isinstance(data["quarterlyReports"], list):
+                data["quarterlyReports"] = sorted(
+                    data["quarterlyReports"],
+                    key=lambda x: x.get("fiscalDateEnding", ""),
+                    reverse=True
+                )[:12]
+            else:
+                data["quarterlyReports"] = []
 
             partial_year = _compute_partial_year_reports(data["quarterlyReports"])
             if partial_year:
                 data["partialYearReports"] = partial_year
 
+            if statement == "income_statement" and not data.get("annualReports"):
+                computed_annual = _compute_annual_from_quarters(data["quarterlyReports"])
+                if computed_annual:
+                    data["annualReports"] = computed_annual[:3]
+
+        if statement == "income_statement":
+            if _is_alpha_vantage_error(data) or not data.get("annualReports"):
+                fallback_annual = _build_income_annual_from_yfinance(symbol)
+                if fallback_annual:
+                    data.pop("Note", None)
+                    data.pop("Error Message", None)
+                    data.pop("Information", None)
+                    data["annualReports"] = fallback_annual[:3]
+
         data["symbol"] = symbol
+        if _has_financial_reports(data):
+            _FINANCIALS_CACHE.set(cache_key, data)
+        else:
+            _FINANCIALS_EMPTY_CACHE.set(cache_key, data)
         financials[statement] = data
     return financials
 
@@ -455,6 +579,33 @@ def _compute_partial_year_reports(quarterly_reports):
 
     # Return in chronological order (oldest first)
     return sorted(partial_sets, key=lambda x: x["year"])
+
+
+def _compute_annual_from_quarters(quarterly_reports):
+    """Builds annual-style aggregates from the latest four quarters in each year."""
+    if not quarterly_reports:
+        return []
+
+    reports_by_year = defaultdict(list)
+    for report in quarterly_reports:
+        date_str = report.get("fiscalDateEnding")
+        if not date_str or len(date_str) < 7:
+            continue
+        year = date_str[:4]
+        reports_by_year[year].append(report)
+
+    annual_reports = []
+    for year, reports in reports_by_year.items():
+        reports_sorted = sorted(reports, key=lambda r: r.get("fiscalDateEnding", ""))
+        if len(reports_sorted) < 4:
+            continue
+        last_four = reports_sorted[-4:]
+        aggregated = _aggregate_quarter_reports(last_four)
+        last_date = max(r.get("fiscalDateEnding", "") for r in last_four)
+        aggregated["fiscalDateEnding"] = last_date
+        annual_reports.append(aggregated)
+
+    return sorted(annual_reports, key=lambda r: r.get("fiscalDateEnding", ""), reverse=True)
 
 
 def _aggregate_quarter_reports(reports):
