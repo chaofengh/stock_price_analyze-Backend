@@ -310,73 +310,129 @@ def fetch_stock_fundamentals(symbol):
       - trailingEPS: Trailing Earnings Per Share.
       - debtToEquity: Debt-to-Equity ratio.
     """
-    ticker = yf.Ticker(symbol)
-    info = ticker.info
+    symbol = _normalize_symbol(symbol)
 
-    # Helper function to safely convert metrics to float
-    def safe_float(key):
+    def safe_float(value):
         try:
-            value = info.get(key)
-            return float(value) if value is not None else None
+            if value is None:
+                return None
+            value = float(value)
         except Exception:
             return None
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        return value
 
-    # Extract basic metrics
-    trailing_pe = safe_float("trailingPE")
-    forward_pe = safe_float("forwardPE")
-    trailing_eps = safe_float("trailingEps")
-    forward_eps = safe_float("forwardEps")
-    earnings_growth = safe_float("earningsGrowth")  # Expected as a decimal (e.g., 0.15 for 15%)
-    current_price = (
-        safe_float("currentPrice")
-        or safe_float("regularMarketPrice")
-        or safe_float("previousClose")
-    )
+    def _extract(info, fast_info):
+        def info_float(key, fallback_keys=None):
+            raw = info.get(key)
+            if raw is None and fallback_keys:
+                for alt_key in fallback_keys:
+                    raw = info.get(alt_key)
+                    if raw is not None:
+                        break
+            return safe_float(raw)
 
-    if trailing_pe is None and trailing_eps is not None and current_price:
-        trailing_pe = current_price / trailing_eps
-    if forward_pe is None and forward_eps is not None and current_price:
-        forward_pe = current_price / forward_eps
+        trailing_pe = info_float("trailingPE")
+        forward_pe = info_float("forwardPE")
+        trailing_eps = info_float("trailingEps")
+        forward_eps = info_float("forwardEps")
+        earnings_growth = info_float("earningsGrowth")
+        current_price = (
+            info_float("currentPrice", ["regularMarketPrice", "previousClose"])
+            or safe_float(fast_info.get("lastPrice"))
+            or safe_float(fast_info.get("regularMarketPrice"))
+            or safe_float(fast_info.get("previousClose"))
+        )
 
-    # Compute PEG: forwardPE divided by (earningsGrowth * 100)
-    if forward_pe is not None and earnings_growth is not None and earnings_growth != 0:
-        PEG = forward_pe / (earnings_growth * 100)
-    else:
-        PEG = None
+        if trailing_pe is None and trailing_eps is not None and current_price:
+            trailing_pe = current_price / trailing_eps
+        if forward_pe is None and forward_eps is not None and current_price:
+            forward_pe = current_price / forward_eps
 
-    # Compute PGI: ratio-based PE Growth Index (using forwardPE and trailingPE)
-    if forward_pe is not None and trailing_pe is not None and trailing_pe != 0:
-        PGI = forward_pe / trailing_pe
-    else:
-        PGI = None
+        if forward_pe is not None and earnings_growth is not None and earnings_growth != 0:
+            PEG = forward_pe / (earnings_growth * 100)
+        else:
+            PEG = None
 
-    # Extract additional metrics
-    trailingPEG    = safe_float("trailingPegRatio")
-    dividendYield  = safe_float("dividendYield")
-    beta           = safe_float("beta")
-    marketCap      = safe_float("marketCap")
-    shares_outstanding = safe_float("sharesOutstanding")
-    if marketCap is None and current_price and shares_outstanding:
-        marketCap = current_price * shares_outstanding
-    priceToBook    = safe_float("priceToBook")
-    forwardEPS     = forward_eps
-    trailingEPS    = trailing_eps
-    debtToEquity   = safe_float("debtToEquity")
+        if forward_pe is not None and trailing_pe is not None and trailing_pe != 0:
+            PGI = forward_pe / trailing_pe
+        else:
+            PGI = None
 
-    return {
-        "trailingPE": trailing_pe,
-        "forwardPE": forward_pe,
-        "PEG": PEG,
-        "PGI": PGI,
-        "trailingPEG": trailingPEG,
-        "dividendYield": dividendYield,
-        "beta": beta,
-        "marketCap": marketCap,
-        "priceToBook": priceToBook,
-        "forwardEPS": forwardEPS,
-        "trailingEPS": trailingEPS,
-        "debtToEquity": debtToEquity,
-    }
+        trailingPEG = info_float("trailingPegRatio")
+        dividendYield = info_float("dividendYield")
+        beta = info_float("beta")
+        marketCap = info_float("marketCap")
+        if marketCap is None:
+            marketCap = safe_float(fast_info.get("marketCap"))
+        shares_outstanding = info_float("sharesOutstanding")
+        if marketCap is None and current_price and shares_outstanding:
+            marketCap = current_price * shares_outstanding
+        priceToBook = info_float("priceToBook")
+        forwardEPS = forward_eps
+        trailingEPS = trailing_eps
+        debtToEquity = info_float("debtToEquity")
+
+        return {
+            "trailingPE": trailing_pe,
+            "forwardPE": forward_pe,
+            "PEG": PEG,
+            "PGI": PGI,
+            "trailingPEG": trailingPEG,
+            "dividendYield": dividendYield,
+            "beta": beta,
+            "marketCap": marketCap,
+            "priceToBook": priceToBook,
+            "forwardEPS": forwardEPS,
+            "trailingEPS": trailingEPS,
+            "debtToEquity": debtToEquity,
+        }
+
+    def _load(symbol_override):
+        try:
+            ticker = yf.Ticker(symbol_override)
+            info = ticker.info or {}
+            try:
+                fast_info = ticker.fast_info or {}
+            except Exception:
+                fast_info = {}
+        except Exception:
+            return {}
+        return _extract(info, fast_info)
+
+    def _is_empty(payload):
+        if not payload:
+            return True
+        for key in (
+            "trailingPE",
+            "forwardPE",
+            "PEG",
+            "PGI",
+            "dividendYield",
+            "beta",
+            "marketCap",
+        ):
+            if payload.get(key) is not None:
+                return False
+        return True
+
+    fundamentals = _load(symbol)
+    if _is_empty(fundamentals):
+        alt_symbols = []
+        if "." in symbol:
+            alt_symbols.append(symbol.replace(".", "-"))
+        if "/" in symbol:
+            alt_symbols.append(symbol.replace("/", "-"))
+        for alt_symbol in alt_symbols:
+            if alt_symbol == symbol:
+                continue
+            alt_fundamentals = _load(alt_symbol)
+            if not _is_empty(alt_fundamentals):
+                fundamentals = alt_fundamentals
+                break
+
+    return fundamentals
 
 def fetch_peers(symbol: str) -> list:
     """
