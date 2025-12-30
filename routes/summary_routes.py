@@ -69,6 +69,37 @@ def _is_empty_fundamentals(payload) -> bool:
             return False
     return True
 
+
+_PEER_AVG_KEYS = (
+    "avg_peer_trailingPE",
+    "avg_peer_forwardPE",
+    "avg_peer_PEG",
+    "avg_peer_PGI",
+    "avg_peer_beta",
+)
+_OVERVIEW_KEYS = (
+    "trailingPE",
+    "forwardPE",
+    "PEG",
+    "PGI",
+    "dividendYield",
+    "beta",
+    "marketCap",
+) + _PEER_AVG_KEYS
+
+
+def _payload_has_any(payload: dict, keys: tuple) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return any(payload.get(key) is not None for key in keys)
+
+
+def _has_peer_info(payload: dict) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    peer_info = payload.get("peer_info")
+    return isinstance(peer_info, dict)
+
 @summary_blueprint.route('/api/summary', methods=['GET'])
 def summary_endpoint():
     """
@@ -106,12 +137,15 @@ def summary_overview_endpoint():
     try:
         if _use_cache():
             cached = _read_cache(OVERVIEW_CACHE, symbol)
-            if cached is not None:
+            if cached is not None and _payload_has_any(cached, _OVERVIEW_KEYS):
                 return jsonify(cached), 200
+            if cached is not None:
+                OVERVIEW_CACHE.delete(symbol)
         overview = get_summary_overview(symbol)
         overview = convert_to_python_types(overview)
         if _use_cache():
-            OVERVIEW_CACHE.set(symbol, overview)
+            if _payload_has_any(overview, _OVERVIEW_KEYS):
+                OVERVIEW_CACHE.set(symbol, overview)
         return jsonify(overview), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -128,8 +162,10 @@ def summary_peers_endpoint():
     try:
         if _use_cache():
             cached = _read_cache(PEERS_CACHE, symbol)
-            if cached is not None:
+            if cached is not None and _has_peer_info(cached):
                 return jsonify(cached), 200
+            if cached is not None:
+                PEERS_CACHE.delete(symbol)
             if PEERS_CACHE.start_inflight(symbol):
                 threading.Thread(
                     target=compute_peers_async,
@@ -179,10 +215,13 @@ def summary_peer_averages_endpoint():
     try:
         if _use_cache():
             cached = _read_cache(PEER_AVG_CACHE, symbol)
-            if cached is not None:
+            if cached is not None and _payload_has_any(cached, _PEER_AVG_KEYS):
                 return jsonify(cached), 200
+            if cached is not None:
+                PEER_AVG_CACHE.delete(symbol)
             payload = convert_to_python_types(get_summary_peer_averages(symbol))
-            PEER_AVG_CACHE.set(symbol, payload)
+            if _payload_has_any(payload, _PEER_AVG_KEYS):
+                PEER_AVG_CACHE.set(symbol, payload)
             return jsonify(payload), 200
         payload = convert_to_python_types(get_summary_peer_averages(symbol))
         return jsonify(payload), 200

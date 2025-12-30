@@ -12,6 +12,14 @@ from .summary_cache import (
     PEER_AVG_CACHE,
 )
 
+_PEER_AVG_KEYS = (
+    "avg_peer_trailingPE",
+    "avg_peer_forwardPE",
+    "avg_peer_PEG",
+    "avg_peer_PGI",
+    "avg_peer_beta",
+)
+
 
 def _is_empty_fundamentals(payload) -> bool:
     if not isinstance(payload, dict):
@@ -28,6 +36,12 @@ def _is_empty_fundamentals(payload) -> bool:
         if payload.get(key) is not None:
             return False
     return True
+
+
+def _payload_has_any(payload: dict, keys: tuple) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return any(payload.get(key) is not None for key in keys)
 
 
 def compute_summary_async(symbol: str):
@@ -66,6 +80,7 @@ def compute_peer_avg_async(symbol: str):
         payload = convert_to_python_types(get_summary_peer_averages(symbol))
         if isinstance(payload, dict):
             payload["symbol"] = symbol
-        PEER_AVG_CACHE.set(symbol, payload)
+        if _payload_has_any(payload, _PEER_AVG_KEYS):
+            PEER_AVG_CACHE.set(symbol, payload)
     finally:
         PEER_AVG_CACHE.finish_inflight(symbol)

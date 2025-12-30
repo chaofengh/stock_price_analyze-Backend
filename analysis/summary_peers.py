@@ -15,6 +15,7 @@ from .summary_peer_utils import (
 _MAX_PEERS = 6
 _PEER_AVG_MAX_PEERS = 12
 _PEER_AVG_CACHE = TTLCache(ttl_seconds=60 * 10, max_size=512)
+_NO_DATA = object()
 
 
 def get_summary_overview(symbol: str) -> dict:
@@ -89,7 +90,11 @@ def get_summary_peer_averages(symbol: str) -> dict:
             return {f"avg_peer_{metric}": None for metric in PEER_METRICS}
         return get_peer_metric_averages(peers)
 
-    peer_avgs = _PEER_AVG_CACHE.get_or_set(symbol, _compute)
+    peer_avgs = _PEER_AVG_CACHE.get(symbol, _NO_DATA)
+    if peer_avgs is _NO_DATA:
+        peer_avgs = _compute()
+        if any(peer_avgs.get(f"avg_peer_{metric}") is not None for metric in PEER_METRICS):
+            _PEER_AVG_CACHE.set(symbol, peer_avgs)
     return {
         "symbol": symbol,
         "avg_peer_trailingPE": peer_avgs.get("avg_peer_trailingPE"),

@@ -13,6 +13,21 @@ _WORLD_MARKETS_CACHE = TTLCache(ttl_seconds=300, max_size=2)
 _WORLD_MARKETS_STALE_CACHE = TTLCache(ttl_seconds=60 * 60 * 12, max_size=2)
 _WORLD_MARKETS_LOCK = threading.Lock()
 _WORLD_MARKETS_INFLIGHT = False
+_WORLD_MARKETS_KEYS = ("percent_change", "last_close", "previous_close")
+
+
+def _has_market_data(payload: dict) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    markets = payload.get("markets")
+    if not isinstance(markets, list):
+        return False
+    for market in markets:
+        if not isinstance(market, dict):
+            continue
+        if any(market.get(key) is not None for key in _WORLD_MARKETS_KEYS):
+            return True
+    return False
 
 
 def _build_pending_snapshot() -> dict:
@@ -44,8 +59,9 @@ def _refresh_world_markets_async():
         try:
             payload = fetch_world_market_moves()
             payload = convert_to_python_types(payload)
-            _WORLD_MARKETS_CACHE.set("snapshot", payload)
-            _WORLD_MARKETS_STALE_CACHE.set("snapshot", payload)
+            if _has_market_data(payload):
+                _WORLD_MARKETS_CACHE.set("snapshot", payload)
+                _WORLD_MARKETS_STALE_CACHE.set("snapshot", payload)
         except Exception:
             pass
         finally:
@@ -65,12 +81,12 @@ def _refresh_world_markets_async():
 def world_markets_snapshot():
     try:
         cached = _WORLD_MARKETS_CACHE.get("snapshot", None)
-        if cached is not None:
+        if cached is not None and _has_market_data(cached):
             return jsonify(cached), 200
 
         stale = _WORLD_MARKETS_STALE_CACHE.get("snapshot", None)
         _refresh_world_markets_async()
-        if stale is not None:
+        if stale is not None and _has_market_data(stale):
             return jsonify(stale), 200
 
         return jsonify(_build_pending_snapshot()), 200
