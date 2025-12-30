@@ -32,6 +32,15 @@ _PEER_AVG_CACHE = {}
 _PEER_AVG_CACHE_LOCK = threading.Lock()
 _PEER_AVG_INFLIGHT = set()
 _PEER_AVG_TTL_SECONDS = 600
+_FUNDAMENTALS_KEYS = (
+    "trailingPE",
+    "forwardPE",
+    "PEG",
+    "PGI",
+    "dividendYield",
+    "beta",
+    "marketCap",
+)
 
 
 def _get_cached_summary(symbol: str):
@@ -122,11 +131,16 @@ def _get_cached_fundamentals_payload(symbol: str):
         if expires_at <= now:
             _FUNDAMENTALS_CACHE.pop(symbol, None)
             return None
+        if not any(payload.get(key) is not None for key in _FUNDAMENTALS_KEYS):
+            _FUNDAMENTALS_CACHE.pop(symbol, None)
+            return None
         return payload
 
 
 def _set_cached_fundamentals_payload(symbol: str, payload: dict):
     with _FUNDAMENTALS_CACHE_LOCK:
+        if not any(payload.get(key) is not None for key in _FUNDAMENTALS_KEYS):
+            return
         _FUNDAMENTALS_CACHE[symbol] = (payload, time.time() + _FUNDAMENTALS_TTL_SECONDS)
 
 

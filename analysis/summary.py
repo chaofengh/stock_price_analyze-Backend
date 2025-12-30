@@ -16,10 +16,8 @@ from utils.ttl_cache import TTLCache
 _MAX_PEERS = 6
 _PEER_AVG_MAX_PEERS = 12
 _FUNDAMENTALS_CACHE = TTLCache(ttl_seconds=60 * 60 * 12, max_size=512)
-_FUNDAMENTALS_EMPTY_CACHE = TTLCache(ttl_seconds=60 * 5, max_size=512)
 _PEERS_CACHE = TTLCache(ttl_seconds=60 * 60 * 12, max_size=512)
 _PEER_FUNDAMENTALS_CACHE = TTLCache(ttl_seconds=60 * 60 * 12, max_size=2048)
-_PEER_FUNDAMENTALS_EMPTY_CACHE = TTLCache(ttl_seconds=60 * 5, max_size=2048)
 _PEER_INFO_CACHE = TTLCache(ttl_seconds=60 * 5, max_size=512)
 _PEER_METRICS = ("trailingPE", "forwardPE", "PEG", "PGI", "beta")
 _PEER_AVG_CACHE = TTLCache(ttl_seconds=60 * 10, max_size=512)
@@ -35,14 +33,9 @@ def _get_cached_fundamentals(symbol: str) -> dict:
     cached = _FUNDAMENTALS_CACHE.get(sym, _NO_DATA)
     if cached is not _NO_DATA:
         return cached
-    cached_empty = _FUNDAMENTALS_EMPTY_CACHE.get(sym, _NO_DATA)
-    if cached_empty is not _NO_DATA:
-        return cached_empty
     fundamentals = get_fundamentals(sym)
     if fundamentals and any(val is not None for val in fundamentals.values()):
         _FUNDAMENTALS_CACHE.set(sym, fundamentals)
-    else:
-        _FUNDAMENTALS_EMPTY_CACHE.set(sym, fundamentals)
     return fundamentals
 
 
@@ -56,14 +49,9 @@ def _get_cached_peer_fundamentals(symbol: str) -> dict:
     cached = _PEER_FUNDAMENTALS_CACHE.get(sym, _NO_DATA)
     if cached is not _NO_DATA:
         return cached
-    cached_empty = _PEER_FUNDAMENTALS_EMPTY_CACHE.get(sym, _NO_DATA)
-    if cached_empty is not _NO_DATA:
-        return cached_empty
     fundamentals = get_fundamentals(sym)
     if fundamentals and any(val is not None for val in fundamentals.values()):
         _PEER_FUNDAMENTALS_CACHE.set(sym, fundamentals)
-    else:
-        _PEER_FUNDAMENTALS_EMPTY_CACHE.set(sym, fundamentals)
     return fundamentals
 
 
