@@ -17,6 +17,7 @@ from routes.financials_routes import financials_blueprint
 from routes.user_routes import user_blueprint
 from routes.backtest_routes import backtest_blueprint
 from routes.ticker_logo_routes import ticker_logo_blueprint
+from routes.world_markets_routes import world_markets_blueprint
 
 # Scheduled job wrapper
 from tasks.daily_scan_tasks import daily_scan_wrapper
@@ -38,6 +39,7 @@ def create_app(testing=False):
     app.register_blueprint(user_blueprint, url_prefix="/api")
     app.register_blueprint(backtest_blueprint)
     app.register_blueprint(ticker_logo_blueprint)
+    app.register_blueprint(world_markets_blueprint)
 
     return app
 
