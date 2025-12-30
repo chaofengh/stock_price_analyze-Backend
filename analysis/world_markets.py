@@ -1,6 +1,10 @@
 """
-analysis/world_markets.py
-Utilities for building a world market snapshot using yfinance.
+world_markets.py
+Purpose: build a world market snapshot with percent changes.
+Pseudocode:
+1) Bulk download recent closes for world indices.
+2) Fallback to per-ticker history if bulk data is missing.
+3) Return a normalized list of market entries.
 """
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple

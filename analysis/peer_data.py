@@ -1,14 +1,10 @@
 """
 peer_data.py
-~~~~~~~~~~~~
-Utility functions for retrieving and packaging intraday peer data.
-
-Currently exports:
-    • get_peer_info(peers, period="1d", interval="5m")
-        → { "PEER1": [ {"timestamp": "...", "close": ...}, ... ], ... }
-
-The timestamps are returned in ISO-8601 strings so the entire structure
-is JSON-serialisable with no custom encoders.
+Purpose: build intraday peer close series for the UI.
+Pseudocode:
+1) Fetch price data for peers in bulk.
+2) For each peer, map time -> close into JSON-friendly records.
+3) Return a dict keyed by peer symbol.
 """
 from typing import Dict, List
 import pandas as pd
@@ -20,32 +16,7 @@ def get_peer_info(
     period: str = "1d",
     interval: str = "5m",
 ) -> Dict[str, List[dict]]:
-    """
-    Fetch every *interval* close price for each peer over *period* and
-    return a dict keyed by symbol.
-
-    Parameters
-    ----------
-    peers : list[str]
-        Ticker symbols of peer companies.
-    period : str, optional (default "1d")
-        yfinance-style look-back window (e.g. "5d", "1mo").
-    interval : str, optional (default "5m")
-        Candle resolution (e.g. "5m", "15m").
-
-    Returns
-    -------
-    dict
-        {
-            "AAPL": [
-                {"timestamp": "2025-08-04T09:30:00-04:00", "close": 182.35},
-                ...
-            ],
-            "MSFT": [...],
-            ...
-        }
-        If no data is available for a peer, the value is an empty list.
-    """
+    """Return intraday close series for each peer."""
     peer_info: Dict[str, List[dict]] = {}
 
     if not peers:
@@ -54,19 +25,27 @@ def get_peer_info(
     # Bulk-fetch data for efficiency
     peer_data = fetch_stock_data(peers, period=period, interval=interval)
 
+    def _time_column(df: pd.DataFrame) -> str | None:
+        if "date" in df.columns:
+            return "date"
+        if "datetime" in df.columns:
+            return "datetime"
+        return None
+
     for symbol in peers:
         df: pd.DataFrame = peer_data.get(symbol, pd.DataFrame())
 
-        if df.empty or "close" not in df.columns:
+        time_col = _time_column(df)
+        if df.empty or "close" not in df.columns or time_col is None:
             peer_info[symbol] = []  # keep key for consistency
             continue
 
-        # Format to list-of-dicts (JSON-friendly)
         records = (
-            df.reset_index()                                # make index a column
-              .loc[:, ["datetime", "close"]]                # keep what we need
-              .assign(datetime=lambda d: d["datetime"].dt.isoformat())
-              .rename(columns={"datetime": "timestamp"})
+            df.loc[:, [time_col, "close"]]
+              .assign(timestamp=lambda d: d[time_col].apply(
+                  lambda v: v.isoformat() if hasattr(v, "isoformat") else str(v)
+              ))
+              .loc[:, ["timestamp", "close"]]
               .to_dict(orient="records")
         )
 

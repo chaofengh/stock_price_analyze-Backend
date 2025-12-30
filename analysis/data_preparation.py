@@ -1,13 +1,18 @@
-# data_preparation.py
+"""
+data_preparation.py
+Purpose: load raw price data and attach indicators needed downstream.
+Pseudocode:
+1) Fetch OHLCV data for symbol(s).
+2) Add Bollinger Bands (and optional RSI).
+3) Return a dict of DataFrames keyed by symbol.
+"""
 import pandas as pd
 from .data_fetcher import fetch_stock_data
 from .indicators import compute_bollinger_bands, compute_rsi
 
-def prepare_stock_data(symbols, include_rsi: bool = True):
+def prepare_stock_data(symbols, include_rsi: bool = True) -> dict:
     """
-    Fetches data for multiple symbols, then computes Bollinger Bands.
-    RSI is optional for callers that need it.
-    Returns a dictionary of DataFrames keyed by symbol.
+    Fetch data and compute indicators for one or many symbols.
     """
     data_dict = fetch_stock_data(symbols)
 
@@ -21,8 +26,7 @@ def prepare_stock_data(symbols, include_rsi: bool = True):
 
 def get_trading_period(data):
     """
-    Given a single DataFrame (with 'date' and 'close'),
-    returns a string of the start-end date and initial/final prices.
+    Return a readable date range plus start/end prices.
     """
     n = len(data)
     if n == 0:

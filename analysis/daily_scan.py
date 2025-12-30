@@ -1,4 +1,11 @@
-# analysis/daily_scan.py
+"""
+daily_scan.py
+Purpose: run the daily Bollinger touch scan across all tracked tickers.
+Pseudocode:
+1) Load all tickers.
+2) Fetch data + indicators.
+3) Detect band touches on the latest candle for each symbol.
+"""
 from datetime import datetime
 import pytz
 
@@ -10,10 +17,7 @@ _CHICAGO_TZ = pytz.timezone("America/Chicago")
 
 def daily_scan():
     """
-    Perform the daily scan, returning a dict with:
-      - timestamp (str, America/Chicago)
-      - alerts (list[dict])
-    The official scheduler runs this at 16:02 CT.
+    Perform the daily scan and return a JSON-friendly payload.
     """
     timestamp = datetime.now(_CHICAGO_TZ).strftime('%Y-%m-%d %H:%M:%S')
 

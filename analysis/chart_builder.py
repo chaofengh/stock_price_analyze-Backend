@@ -1,7 +1,14 @@
-# chart_builder.py
+"""
+chart_builder.py
+Purpose: format chart-ready data for the frontend.
+Pseudocode:
+1) Build a set of touch indices.
+2) For each row, emit a minimal dict with date/close/bands.
+"""
 import pandas as pd
 
 def build_chart_data(data, touches) -> list:
+    """Return a list of chart points with optional touch markers."""
     n = len(data)
     touch_indices = {t['index'] for t in touches}
     

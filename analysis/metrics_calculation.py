@@ -1,16 +1,29 @@
-# metrics_calculation.py
-import numpy as np
+"""
+metrics_calculation.py
+Purpose: aggregate touch/hug events into summary stats.
+Pseudocode:
+1) Compute per-event averages (bounce/drop, days to pivot).
+2) Calculate accuracy as ratio of "good" outcomes.
+3) Return a flat dict of aggregate values.
+"""
 
-def average(items, key):
+def _mean(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def average(items: list[dict], key: str) -> float | None:
     if not items:
         return None
-    return sum(item[key] for item in items) / len(items)
+    return _mean([item[key] for item in items])
 
-def compute_hug_length(hug_events):
+
+def compute_hug_length(hug_events: list[dict]) -> float | None:
     if not hug_events:
         return None
-    lengths = [(h['end_index'] - h['start_index'] + 1) for h in hug_events]
-    return np.mean(lengths)
+    lengths = [(h["end_index"] - h["start_index"] + 1) for h in hug_events]
+    return _mean(lengths)
 
 def compute_aggregates(results, hug_events_upper, hug_events_lower) -> dict:
     aggregates = {}

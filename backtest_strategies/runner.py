@@ -146,6 +146,31 @@ def _evaluate_metrics_only(df, or_levels, p):
     return res
 
 
+def _collect_metrics_parallel(df: pd.DataFrame, or_levels, workers: int) -> list[dict]:
+    with parallel_backend("loky", inner_max_num_threads=1):
+        return sum(
+            Parallel(n_jobs=workers)(
+                delayed(_evaluate_metrics_only)(df, or_levels, p) for p in param_grid()
+            ),
+            start=[]
+        )
+
+
+def _collect_metrics_sequential(df: pd.DataFrame, or_levels) -> list[dict]:
+    return sum(
+        (_evaluate_metrics_only(df, or_levels, p) for p in param_grid()),
+        start=[]
+    )
+
+
+def _collect_metrics(df: pd.DataFrame, or_levels, workers: int) -> list[dict]:
+    try:
+        return _collect_metrics_parallel(df, or_levels, workers)
+    except (PermissionError, OSError) as exc:
+        logger.warning("Falling back to sequential grid metrics: %s", exc)
+        return _collect_metrics_sequential(df, or_levels)
+
+
 # ────────────────────────────────────────────────────────────────
 # Helper to hash a trade‑log deterministically
 # ────────────────────────────────────────────────────────────────
@@ -175,13 +200,7 @@ def run_backtest_grid(ticker: str, days: str = "30d", interval: str = "5m", top_
     workers = max(1, min(multiprocessing.cpu_count(), 8))
 
     # 1) metrics‑only pass
-    with parallel_backend("loky", inner_max_num_threads=1):
-        scenarios_metrics = sum(
-            Parallel(n_jobs=workers)(
-                delayed(_evaluate_metrics_only)(df, or_levels, p) for p in param_grid()
-            ),
-            start=[]
-        )
+    scenarios_metrics = _collect_metrics(df, or_levels, workers)
 
     # sort once for deterministic ordering
     scenarios_metrics.sort(key=lambda s: (s["win_rate"], s["profit_factor"] or 0), reverse=True)

@@ -1,7 +1,14 @@
-# fundamentals.py
+"""
+fundamentals.py
+Purpose: thin wrappers around fundamentals and peers fetchers.
+Pseudocode:
+1) Fetch fundamentals safely (return {} on failure).
+2) Fetch peers and peer fundamentals for comparison.
+"""
 from .data_fetcher import fetch_stock_fundamentals, fetch_peers
 
 def get_fundamentals(symbol: str) -> dict:
+    """Return fundamentals dict or empty dict on error."""
     try:
         fundamentals = fetch_stock_fundamentals(symbol)
     except Exception:
@@ -9,9 +16,11 @@ def get_fundamentals(symbol: str) -> dict:
     return fundamentals
 
 def get_peers(symbol: str) -> list:
+    """Return peer symbols for a ticker."""
     return fetch_peers(symbol)
 
 def get_peers_fundamentals(peers: list) -> dict:
+    """Fetch fundamentals for each peer symbol."""
     peers_fundamentals = {}
     for peer_symbol in peers:
         try:

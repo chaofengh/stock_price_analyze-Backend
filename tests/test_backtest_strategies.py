@@ -335,7 +335,12 @@ def test_run_backtest_grid_integration(qqq_df_raw):
         return qqq_df_raw.copy()
 
     with patch.object(runner, "fetch_intraday_data", _fake_fetch):
-        res = run_backtest_grid("QQQ", days="7d", interval="5m", top_n=5)
+        with patch.object(
+            runner,
+            "_collect_metrics_parallel",
+            side_effect=PermissionError("no semaphores"),
+        ):
+            res = run_backtest_grid("QQQ", days="7d", interval="5m", top_n=5)
 
     candles = res["intraday_data"]
     # Engines now drop the first ~20 rows while computing indicators.    # NEW

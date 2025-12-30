@@ -1,93 +1,94 @@
-#event_detection.py
+"""
+event_detection.py
+Purpose: detect Bollinger Band touches and build multi-day "hug" events.
+Pseudocode:
+1) For alert mode, check the latest candle for upper/lower band touches.
+2) For historical mode, scan all rows and record touch events.
+3) Group consecutive touches into hug events.
+"""
 import pandas as pd
 
-# Touch detection remains largely the same
-def process_bollinger_touches(data, mode='alert'):
+
+def _list_tail(series: pd.Series, n: int = 30) -> list:
+    """Return the last N values as floats/None (no NaNs)."""
+    out = []
+    for value in series.tail(n).tolist():
+        if value is None or value != value:  # NaN != NaN
+            out.append(None)
+            continue
+        try:
+            out.append(float(value))
+        except (TypeError, ValueError):
+            out.append(None)
+    return out
+
+
+def _has_required_fields(row: pd.Series, fields: list[str]) -> bool:
+    """True if all required fields are present and not NaN."""
+    return all((row.get(field) is not None) and (row.get(field) == row.get(field)) for field in fields)
+
+
+def process_bollinger_touches(data, mode: str = "alert") -> list[dict]:
     """
     Process Bollinger Band touches in two modes.
-    
-    For mode 'alert':
-      - Expects data as a dict {symbol: DataFrame}.
-      - Checks the latest row for each symbol.
-      - Returns a list of alert dictionaries including:
-            "symbol", "close_price", "bb_upper", "bb_lower", "touched_side",
-            "recent_closes", "recent_bb_upper", "recent_bb_lower".
-    
-    For mode 'historical':
-      - Expects data as a DataFrame for a single ticker.
-      - Iterates over all rows and returns a list of touch events with:
-            "date", "index", "band" (either 'upper' or 'lower'), and "price".
-    """
-    def _tolist_30(series):
-        # Convert to a Python list of length <= 30 with floats/None (no NaNs)
-        out = []
-        for v in series.tail(30).tolist():
-            if v is None or v != v:   # handles None and NaN (NaN != NaN)
-                out.append(None)
-            else:
-                try:
-                    out.append(float(v))
-                except (TypeError, ValueError):
-                    out.append(None)
-        return out
 
-    results = []
-    
-    if mode == 'alert':
-        # data is a dict of {symbol: DataFrame}
+    alert: data is {symbol: DataFrame}, only the last row is checked.
+    historical: data is a single DataFrame, all rows are scanned.
+    """
+    results: list[dict] = []
+
+    if mode == "alert":
         for symbol, df in data.items():
             if df is None or df.empty:
                 continue
-
             last_row = df.iloc[-1]
-            required_fields = ['close', 'BB_upper', 'BB_lower', 'high', 'low']
-            # Robust check for missing/NaN values
-            if any((last_row.get(f) is None) or (last_row.get(f) != last_row.get(f)) for f in required_fields):
+            required = ["close", "BB_upper", "BB_lower", "high", "low"]
+            if not _has_required_fields(last_row, required):
                 continue
 
             touched_side = None
-            if last_row['high'] >= last_row['BB_upper']:
+            if last_row["high"] >= last_row["BB_upper"]:
                 touched_side = "Upper"
-            elif last_row['low'] <= last_row['BB_lower']:
+            elif last_row["low"] <= last_row["BB_lower"]:
                 touched_side = "Lower"
-            
+
             if touched_side:
                 results.append({
                     "symbol": symbol,
-                    "close_price": float(last_row['close']),
-                    "bb_upper": float(last_row['BB_upper']),
-                    "bb_lower": float(last_row['BB_lower']),
-                    "low_price": float(last_row['low']),
-                    "high_price": float(last_row['high']),
+                    "close_price": float(last_row["close"]),
+                    "bb_upper": float(last_row["BB_upper"]),
+                    "bb_lower": float(last_row["BB_lower"]),
+                    "low_price": float(last_row["low"]),
+                    "high_price": float(last_row["high"]),
                     "touched_side": touched_side,
-                    # For charting (aligned, JSON-safe lists)
-                    "recent_closes": _tolist_30(df['close']),
-                    "recent_bb_upper": _tolist_30(df['BB_upper']),
-                    "recent_bb_lower": _tolist_30(df['BB_lower']),
+                    "recent_closes": _list_tail(df["close"]),
+                    "recent_bb_upper": _list_tail(df["BB_upper"]),
+                    "recent_bb_lower": _list_tail(df["BB_lower"]),
                 })
-                
-    elif mode == 'historical':
-        # data is a DataFrame for a single ticker
-        n = len(data)
-        for i in range(n):
+        return results
+
+    if mode == "historical":
+        required = ["date", "close", "BB_upper", "BB_lower", "high", "low"]
+        for i in range(len(data)):
             row = data.iloc[i]
-            required_fields = ['date', 'close', 'BB_upper', 'BB_lower', 'high', 'low']
-            if any((row.get(f) is None) or (row.get(f) != row.get(f)) for f in required_fields):
+            if not _has_required_fields(row, required):
                 continue
-            if row['high'] >= row['BB_upper']:
+            if row["high"] >= row["BB_upper"]:
                 results.append({
-                    "date": row['date'],
+                    "date": row["date"],
                     "index": i,
                     "band": "upper",
-                    "price": float(row['close'])
+                    "price": float(row["close"]),
                 })
-            if row['low'] <= row['BB_lower']:
+            if row["low"] <= row["BB_lower"]:
                 results.append({
-                    "date": row['date'],
+                    "date": row["date"],
                     "index": i,
                     "band": "lower",
-                    "price": float(row['close'])
+                    "price": float(row["close"]),
                 })
+        return results
+
     return results
 
 
@@ -98,9 +99,9 @@ def detect_hug_events(
     min_group_len: int = 2,   # require at least this many consecutive days for an event
 ) -> tuple[list[dict], list[dict]]:
     """
-    Build multi-day “hug” events directly from the `touches` list.
+    Build multi-day "hug" events directly from the `touches` list.
 
-    A hug event is defined as ≥ `min_group_len` **consecutive trading days**
+    A hug event is defined as >= `min_group_len` consecutive trading days
     where each close was already flagged as touching a Bollinger band.
 
     Parameters
@@ -187,5 +188,3 @@ def find_short_term_low(df, start_idx, window=5):
     lowest_idx = window_slice['close'].idxmin()
     lowest_price = window_slice['close'].min()
     return (lowest_idx, lowest_price)
-
-

@@ -1,8 +1,15 @@
-# additional_metrics.py
+"""
+additional_metrics.py
+Purpose: compute extra summary stats for a price series.
+Pseudocode:
+1) Compute volume and price ranges.
+2) Compute volatility and band width averages.
+3) Compute RSI mean and std.
+"""
 import numpy as np
-import pandas as pd
 
 def compute_additional_metrics(data, initial_price, final_price) -> dict:
+    """Compute helper metrics from a single price DataFrame."""
     total_volume = data['volume'].sum()
     average_volume = data['volume'].mean()
     max_price = data['high'].max()
@@ -12,8 +19,8 @@ def compute_additional_metrics(data, initial_price, final_price) -> dict:
     daily_returns = data['close'].pct_change()
     volatility = daily_returns.std()
 
-    data['BB_width'] = data['BB_upper'] - data['BB_lower']
-    avg_BB_width = data['BB_width'].mean()
+    bb_width = data['BB_upper'] - data['BB_lower']
+    avg_BB_width = bb_width.mean()
 
     rsi_mean = data['rsi'].mean()
     rsi_std  = data['rsi'].std()
@@ -31,6 +38,7 @@ def compute_additional_metrics(data, initial_price, final_price) -> dict:
     }
 
 def compute_avg_hug_length(hug_list) -> float:
+    """Return average hug length in days (0.0 if empty)."""
     if not hug_list:
         return 0.0
     lengths = [(h['end_index'] - h['start_index'] + 1) for h in hug_list]

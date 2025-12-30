@@ -1,0 +1,100 @@
+"""
+summary_peers.py
+Purpose: build fundamentals and peer comparison payloads for summary endpoints.
+"""
+from concurrent.futures import ThreadPoolExecutor
+from utils.ttl_cache import TTLCache
+from .summary_cache import normalize_symbol, get_cached_fundamentals, get_cached_peers
+from .summary_peer_utils import (
+    PEER_METRICS,
+    normalize_peers,
+    get_cached_peer_info,
+    get_peer_metric_averages,
+)
+
+_MAX_PEERS = 6
+_PEER_AVG_MAX_PEERS = 12
+_PEER_AVG_CACHE = TTLCache(ttl_seconds=60 * 10, max_size=512)
+
+
+def get_summary_overview(symbol: str) -> dict:
+    symbol = normalize_symbol(symbol)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        fundamentals_future = executor.submit(get_cached_fundamentals, symbol)
+        peers_future = executor.submit(get_cached_peers, symbol)
+
+        fundamentals = fundamentals_future.result()
+        peers = peers_future.result()
+
+    peers = normalize_peers(symbol, peers, max_peers=_PEER_AVG_MAX_PEERS)
+    if peers:
+        peer_avgs = get_peer_metric_averages(peers)
+    else:
+        peer_avgs = {f"avg_peer_{metric}": None for metric in PEER_METRICS}
+
+    return {
+        "symbol": symbol,
+        "trailingPE": fundamentals.get("trailingPE"),
+        "forwardPE": fundamentals.get("forwardPE"),
+        "PEG": fundamentals.get("PEG"),
+        "PGI": fundamentals.get("PGI"),
+        "dividendYield": fundamentals.get("dividendYield"),
+        "beta": fundamentals.get("beta"),
+        "marketCap": fundamentals.get("marketCap"),
+        "avg_peer_trailingPE": peer_avgs.get("avg_peer_trailingPE"),
+        "avg_peer_forwardPE": peer_avgs.get("avg_peer_forwardPE"),
+        "avg_peer_PEG": peer_avgs.get("avg_peer_PEG"),
+        "avg_peer_PGI": peer_avgs.get("avg_peer_PGI"),
+        "avg_peer_beta": peer_avgs.get("avg_peer_beta"),
+    }
+
+
+def get_summary_peers(symbol: str) -> dict:
+    symbol = normalize_symbol(symbol)
+    peers = get_cached_peers(symbol)
+    peers = normalize_peers(symbol, peers, max_peers=_MAX_PEERS)
+    peer_info = get_cached_peer_info(peers)
+    return {
+        "symbol": symbol,
+        "peer_info": peer_info,
+    }
+
+
+def get_summary_fundamentals(symbol: str) -> dict:
+    symbol = normalize_symbol(symbol)
+    fundamentals = get_cached_fundamentals(symbol)
+    return {
+        "symbol": symbol,
+        "trailingPE": fundamentals.get("trailingPE"),
+        "forwardPE": fundamentals.get("forwardPE"),
+        "PEG": fundamentals.get("PEG"),
+        "PGI": fundamentals.get("PGI"),
+        "dividendYield": fundamentals.get("dividendYield"),
+        "beta": fundamentals.get("beta"),
+        "marketCap": fundamentals.get("marketCap"),
+    }
+
+
+def get_summary_peer_averages(symbol: str) -> dict:
+    symbol = normalize_symbol(symbol)
+
+    def _compute():
+        peers = normalize_peers(
+            symbol,
+            get_cached_peers(symbol),
+            max_peers=_PEER_AVG_MAX_PEERS,
+        )
+        if not peers:
+            return {f"avg_peer_{metric}": None for metric in PEER_METRICS}
+        return get_peer_metric_averages(peers)
+
+    peer_avgs = _PEER_AVG_CACHE.get_or_set(symbol, _compute)
+    return {
+        "symbol": symbol,
+        "avg_peer_trailingPE": peer_avgs.get("avg_peer_trailingPE"),
+        "avg_peer_forwardPE": peer_avgs.get("avg_peer_forwardPE"),
+        "avg_peer_PEG": peer_avgs.get("avg_peer_PEG"),
+        "avg_peer_PGI": peer_avgs.get("avg_peer_PGI"),
+        "avg_peer_beta": peer_avgs.get("avg_peer_beta"),
+    }
