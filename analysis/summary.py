@@ -14,10 +14,12 @@ from .data_fetcher import fetch_stock_data
 from utils.ttl_cache import TTLCache
 
 _MAX_PEERS = 6
+_PEER_AVG_MAX_PEERS = 12
 _FUNDAMENTALS_CACHE = TTLCache(ttl_seconds=60 * 60 * 12, max_size=512)
 _FUNDAMENTALS_EMPTY_CACHE = TTLCache(ttl_seconds=60 * 5, max_size=512)
 _PEERS_CACHE = TTLCache(ttl_seconds=60 * 60 * 12, max_size=512)
 _PEER_FUNDAMENTALS_CACHE = TTLCache(ttl_seconds=60 * 60 * 12, max_size=2048)
+_PEER_FUNDAMENTALS_EMPTY_CACHE = TTLCache(ttl_seconds=60 * 5, max_size=2048)
 _PEER_INFO_CACHE = TTLCache(ttl_seconds=60 * 5, max_size=512)
 _PEER_METRICS = ("trailingPE", "forwardPE", "PEG", "PGI", "beta")
 _PEER_AVG_CACHE = TTLCache(ttl_seconds=60 * 10, max_size=512)
@@ -51,10 +53,21 @@ def _get_cached_peers(symbol: str) -> list:
 
 def _get_cached_peer_fundamentals(symbol: str) -> dict:
     sym = _normalize_symbol(symbol)
-    return _PEER_FUNDAMENTALS_CACHE.get_or_set(sym, lambda: get_fundamentals(sym))
+    cached = _PEER_FUNDAMENTALS_CACHE.get(sym, _NO_DATA)
+    if cached is not _NO_DATA:
+        return cached
+    cached_empty = _PEER_FUNDAMENTALS_EMPTY_CACHE.get(sym, _NO_DATA)
+    if cached_empty is not _NO_DATA:
+        return cached_empty
+    fundamentals = get_fundamentals(sym)
+    if fundamentals and any(val is not None for val in fundamentals.values()):
+        _PEER_FUNDAMENTALS_CACHE.set(sym, fundamentals)
+    else:
+        _PEER_FUNDAMENTALS_EMPTY_CACHE.set(sym, fundamentals)
+    return fundamentals
 
 
-def _normalize_peers(symbol: str, peers: list) -> list:
+def _normalize_peers(symbol: str, peers: list, max_peers: int = _MAX_PEERS) -> list:
     normalized_symbol = _normalize_symbol(symbol)
     peers_filtered = []
     seen = set()
@@ -66,7 +79,7 @@ def _normalize_peers(symbol: str, peers: list) -> list:
             continue
         seen.add(peer_upper)
         peers_filtered.append(peer_upper)
-        if len(peers_filtered) >= _MAX_PEERS:
+        if len(peers_filtered) >= max_peers:
             break
     return peers_filtered
 
@@ -180,7 +193,7 @@ def get_summary_overview(symbol: str) -> dict:
         fundamentals = fundamentals_future.result()
         peers = peers_future.result()
 
-    peers = _normalize_peers(symbol, peers)
+    peers = _normalize_peers(symbol, peers, max_peers=_PEER_AVG_MAX_PEERS)
     if peers:
         peer_avgs = _get_peer_metric_averages(peers)
     else:
@@ -206,7 +219,7 @@ def get_summary_overview(symbol: str) -> dict:
 def get_summary_peers(symbol: str) -> dict:
     symbol = _normalize_symbol(symbol)
     peers = _get_cached_peers(symbol)
-    peers = _normalize_peers(symbol, peers)
+    peers = _normalize_peers(symbol, peers, max_peers=_MAX_PEERS)
     peer_info = _get_cached_peer_info(peers)
     return {
         'symbol': symbol,
@@ -233,7 +246,11 @@ def get_summary_peer_averages(symbol: str) -> dict:
     symbol = _normalize_symbol(symbol)
 
     def _compute():
-        peers = _normalize_peers(symbol, _get_cached_peers(symbol))
+        peers = _normalize_peers(
+            symbol,
+            _get_cached_peers(symbol),
+            max_peers=_PEER_AVG_MAX_PEERS,
+        )
         if not peers:
             return {f"avg_peer_{metric}": None for metric in _PEER_METRICS}
         return _get_peer_metric_averages(peers)
