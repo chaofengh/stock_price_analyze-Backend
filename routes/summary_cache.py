@@ -24,6 +24,10 @@ class CacheBucket:
         with self._lock:
             self._data[key] = (payload, time.time() + self.ttl_seconds)
 
+    def delete(self, key: str):
+        with self._lock:
+            self._data.pop(key, None)
+
 
 class AsyncCache(CacheBucket):
     def __init__(self, ttl_seconds: int):

@@ -18,8 +18,6 @@ from .summary_cache import (
 from .summary_tasks import (
     compute_summary_async,
     compute_peers_async,
-    compute_fundamentals_async,
-    compute_peer_avg_async,
 )
 
 summary_blueprint = Blueprint('summary', __name__)
@@ -34,12 +32,42 @@ def _use_cache() -> bool:
     return not current_app.config.get("TESTING", False)
 
 
+def _read_cache(cache, symbol: str):
+    cached = cache.get(symbol)
+    if not isinstance(cached, dict):
+        return cached
+    cached_symbol = cached.get("symbol")
+    if cached_symbol and cached_symbol != symbol:
+        current_app.logger.warning(
+            "Summary cache symbol mismatch: %s != %s", cached_symbol, symbol
+        )
+        return None
+    return cached
+
+
 def _pending_response(symbol: str, status_code: int = 200):
     return jsonify({
         'symbol': symbol,
         'status': 'pending',
         'retry_after_seconds': 1,
     }), status_code
+
+
+def _is_empty_fundamentals(payload) -> bool:
+    if not isinstance(payload, dict):
+        return True
+    for key in (
+        "trailingPE",
+        "forwardPE",
+        "PEG",
+        "PGI",
+        "dividendYield",
+        "beta",
+        "marketCap",
+    ):
+        if payload.get(key) is not None:
+            return False
+    return True
 
 @summary_blueprint.route('/api/summary', methods=['GET'])
 def summary_endpoint():
@@ -51,7 +79,7 @@ def summary_endpoint():
     symbol = _get_symbol()
     try:
         if _use_cache():
-            cached = SUMMARY_CACHE.get(symbol)
+            cached = _read_cache(SUMMARY_CACHE, symbol)
             if cached is not None:
                 return jsonify(cached), 200
             if SUMMARY_CACHE.start_inflight(symbol):
@@ -77,7 +105,7 @@ def summary_overview_endpoint():
     symbol = _get_symbol()
     try:
         if _use_cache():
-            cached = OVERVIEW_CACHE.get(symbol)
+            cached = _read_cache(OVERVIEW_CACHE, symbol)
             if cached is not None:
                 return jsonify(cached), 200
         overview = get_summary_overview(symbol)
@@ -99,7 +127,7 @@ def summary_peers_endpoint():
     symbol = _get_symbol()
     try:
         if _use_cache():
-            cached = PEERS_CACHE.get(symbol)
+            cached = _read_cache(PEERS_CACHE, symbol)
             if cached is not None:
                 return jsonify(cached), 200
             if PEERS_CACHE.start_inflight(symbol):
@@ -125,16 +153,15 @@ def summary_fundamentals_endpoint():
     symbol = _get_symbol()
     try:
         if _use_cache():
-            cached = FUNDAMENTALS_CACHE.get(symbol)
-            if cached is not None:
+            cached = _read_cache(FUNDAMENTALS_CACHE, symbol)
+            if cached is not None and not _is_empty_fundamentals(cached):
                 return jsonify(cached), 200
-            if FUNDAMENTALS_CACHE.start_inflight(symbol):
-                threading.Thread(
-                    target=compute_fundamentals_async,
-                    args=(symbol,),
-                    daemon=True,
-                ).start()
-            return _pending_response(symbol, status_code=202)
+            if cached is not None:
+                FUNDAMENTALS_CACHE.delete(symbol)
+            payload = convert_to_python_types(get_summary_fundamentals(symbol))
+            if not _is_empty_fundamentals(payload):
+                FUNDAMENTALS_CACHE.set(symbol, payload)
+            return jsonify(payload), 200
         payload = convert_to_python_types(get_summary_fundamentals(symbol))
         return jsonify(payload), 200
     except Exception as e:
@@ -151,16 +178,12 @@ def summary_peer_averages_endpoint():
     symbol = _get_symbol()
     try:
         if _use_cache():
-            cached = PEER_AVG_CACHE.get(symbol)
+            cached = _read_cache(PEER_AVG_CACHE, symbol)
             if cached is not None:
                 return jsonify(cached), 200
-            if PEER_AVG_CACHE.start_inflight(symbol):
-                threading.Thread(
-                    target=compute_peer_avg_async,
-                    args=(symbol,),
-                    daemon=True,
-                ).start()
-            return _pending_response(symbol, status_code=202)
+            payload = convert_to_python_types(get_summary_peer_averages(symbol))
+            PEER_AVG_CACHE.set(symbol, payload)
+            return jsonify(payload), 200
         payload = convert_to_python_types(get_summary_peer_averages(symbol))
         return jsonify(payload), 200
     except Exception as e:

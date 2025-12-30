@@ -6,7 +6,6 @@ from utils.ttl_cache import TTLCache
 from .fundamentals import get_fundamentals, get_peers
 
 _FUNDAMENTALS_CACHE = TTLCache(ttl_seconds=60 * 60 * 12, max_size=512)
-_FUNDAMENTALS_EMPTY_CACHE = TTLCache(ttl_seconds=60 * 5, max_size=512)
 _PEERS_CACHE = TTLCache(ttl_seconds=60 * 60 * 12, max_size=512)
 _PEERS_EMPTY_CACHE = TTLCache(ttl_seconds=60 * 5, max_size=512)
 _PEER_FUNDAMENTALS_CACHE = TTLCache(ttl_seconds=60 * 60 * 12, max_size=2048)
@@ -41,13 +40,13 @@ def _cached_lookup(key, cache, empty_cache, fetch_fn, is_empty):
 
 def get_cached_fundamentals(symbol: str) -> dict:
     sym = normalize_symbol(symbol)
-    return _cached_lookup(
-        sym,
-        _FUNDAMENTALS_CACHE,
-        _FUNDAMENTALS_EMPTY_CACHE,
-        lambda: get_fundamentals(sym),
-        _is_empty_fundamentals,
-    )
+    cached = _FUNDAMENTALS_CACHE.get(sym, _NO_DATA)
+    if cached is not _NO_DATA:
+        return cached
+    value = get_fundamentals(sym)
+    if not _is_empty_fundamentals(value):
+        _FUNDAMENTALS_CACHE.set(sym, value)
+    return value
 
 
 def get_cached_peers(symbol: str) -> list:
