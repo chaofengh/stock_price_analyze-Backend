@@ -2,7 +2,7 @@
 
 import threading
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
 from analysis.world_markets import WORLD_MARKETS, fetch_world_market_moves
 from utils.serialization import convert_to_python_types
@@ -77,9 +77,43 @@ def _refresh_world_markets_async():
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _refresh_world_markets_sync():
+    global _WORLD_MARKETS_INFLIGHT
+    with _WORLD_MARKETS_LOCK:
+        if _WORLD_MARKETS_INFLIGHT:
+            return None
+        _WORLD_MARKETS_INFLIGHT = True
+
+    try:
+        payload = fetch_world_market_moves()
+        payload = convert_to_python_types(payload)
+        if _has_market_data(payload):
+            _WORLD_MARKETS_CACHE.set("snapshot", payload)
+            _WORLD_MARKETS_STALE_CACHE.set("snapshot", payload)
+            return payload
+        return None
+    except Exception:
+        return None
+    finally:
+        with _WORLD_MARKETS_LOCK:
+            _WORLD_MARKETS_INFLIGHT = False
+
+
+def _is_truthy(value: str) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 @world_markets_blueprint.route("/api/world-markets", methods=["GET"])
 def world_markets_snapshot():
     try:
+        refresh_requested = _is_truthy(request.args.get("refresh"))
+        if refresh_requested:
+            latest = _refresh_world_markets_sync()
+            if latest is not None:
+                return jsonify(latest), 200
+
         cached = _WORLD_MARKETS_CACHE.get("snapshot", None)
         if cached is not None and _has_market_data(cached):
             return jsonify(cached), 200
