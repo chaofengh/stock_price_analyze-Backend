@@ -17,3 +17,20 @@ def test_alerts_stream(client):
         assert response.status_code == 200
         assert response.mimetype == "text/event-stream"
 
+
+def test_alert_filter_uses_symbol_key():
+    result = {
+        "timestamp": "2023-01-01 10:00:00",
+        "alerts": [
+            {"symbol": "META"},
+            {"symbol": "aapl"},
+            {"ticker": "tsla"},
+            {"symbol": None},
+        ],
+    }
+    with patch("routes.alerts_routes.get_all_tickers", return_value=["meta", "TSLA"]):
+        from routes.alerts_routes import _filter_for_user
+
+        filtered = _filter_for_user(result, user_id=1)
+
+    assert [a.get("symbol") or a.get("ticker") for a in filtered["alerts"]] == ["META", "tsla"]

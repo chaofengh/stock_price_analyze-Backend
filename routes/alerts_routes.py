@@ -16,14 +16,18 @@ def _filter_for_user(result: dict, user_id: int | None) -> dict:
     if user_id is None:
         return result
     try:
-        watchlist = set(get_all_tickers(user_id=user_id) or [])
+        watchlist = {t.upper() for t in (get_all_tickers(user_id=user_id) or []) if t}
     except Exception:
         return result  # fail open
+
+    def _alert_symbol(alert: dict) -> str | None:
+        symbol = alert.get("symbol") or alert.get("ticker")
+        return symbol.upper() if isinstance(symbol, str) else None
 
     filtered = result.copy()
     filtered["alerts"] = [
         a for a in (result.get("alerts") or [])
-        if a.get("ticker") in watchlist
+        if _alert_symbol(a) in watchlist
     ]
     return filtered
 
