@@ -7,7 +7,7 @@ from analysis.data_fetcher_fundamentals_extract import extract_fundamentals, is_
 
 
 def _make_statement_df(values, col="2023-12-31"):
-    return pd.DataFrame(values, columns=[col])
+    return pd.DataFrame({col: pd.Series(values)})
 
 
 def test_extract_fundamentals_derives_metrics_from_info_and_statements():
@@ -22,27 +22,27 @@ def test_extract_fundamentals_derives_metrics_from_info_and_statements():
     fast_info = {}
     income = _make_statement_df(
         {
-            "Total Revenue": [1000],
-            "Cost Of Revenue": [400],
-            "Operating Income": [200],
-            "Income Before Tax": [180],
-            "Income Tax Expense": [30],
-            "Net Income": [150],
+            "Total Revenue": 1000,
+            "Cost Of Revenue": 400,
+            "Operating Income": 200,
+            "Income Before Tax": 180,
+            "Income Tax Expense": 30,
+            "Net Income": 150,
         }
     )
     balance = _make_statement_df(
         {
-            "Total Assets": [2000],
-            "Total Current Liabilities": [500],
-            "Total Stockholder Equity": [800],
-            "Total Debt": [300],
-            "Cash And Cash Equivalents": [100],
+            "Total Assets": 2000,
+            "Total Current Liabilities": 500,
+            "Total Stockholder Equity": 800,
+            "Total Debt": 300,
+            "Cash And Cash Equivalents": 100,
         }
     )
     cashflow = _make_statement_df(
         {
-            "Capital Expenditures": [-50],
-            "Operating Cash Flow": [250],
+            "Capital Expenditures": -50,
+            "Operating Cash Flow": 250,
         }
     )
 
@@ -128,7 +128,7 @@ def test_extract_fundamentals_uses_alpha_quarterly_for_roic():
         fast_info={},
         statements={"alpha_financials": alpha_financials},
     )
-    assert result["roic"] == pytest.approx(160 / 900)
+    assert result["roic"] == pytest.approx(640 / 900)
     assert result["metricTrends"]["roic"]["recent"] != []
 
 

@@ -166,8 +166,8 @@ def _collect_metrics_sequential(df: pd.DataFrame, or_levels) -> list[dict]:
 def _collect_metrics(df: pd.DataFrame, or_levels, workers: int) -> list[dict]:
     try:
         return _collect_metrics_parallel(df, or_levels, workers)
-    except (PermissionError, OSError) as exc:
-        logger.warning("Falling back to sequential grid metrics: %s", exc)
+    except (PermissionError, NotImplementedError, OSError) as exc:
+        logger.warning("Parallel backtest disabled (%s); running sequentially.", exc)
         return _collect_metrics_sequential(df, or_levels)
 
 

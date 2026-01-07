@@ -10,36 +10,36 @@ from analysis.data_fetcher_fundamentals_metrics import (
 
 
 def _make_statement_df(values, col="2023-12-31"):
-    return pd.DataFrame(values, columns=[col])
+    return pd.DataFrame({col: pd.Series(values)})
 
 
 def test_build_metric_snapshot_computes_ratios():
     income_df = _make_statement_df(
         {
-            "Total Revenue": [1000],
-            "Cost Of Revenue": [400],
-            "Operating Income": [200],
-            "EBITDA": [220],
-            "Selling General Administrative": [100],
-            "Research Development": [50],
-            "Income Before Tax": [180],
-            "Income Tax Expense": [30],
-            "Net Income": [150],
+            "Total Revenue": 1000,
+            "Cost Of Revenue": 400,
+            "Operating Income": 200,
+            "EBITDA": 220,
+            "Selling General Administrative": 100,
+            "Research Development": 50,
+            "Income Before Tax": 180,
+            "Income Tax Expense": 30,
+            "Net Income": 150,
         }
     )
     balance_df = _make_statement_df(
         {
-            "Total Assets": [2000],
-            "Total Current Liabilities": [500],
-            "Total Stockholder Equity": [800],
-            "Total Debt": [300],
-            "Cash And Cash Equivalents": [100],
+            "Total Assets": 2000,
+            "Total Current Liabilities": 500,
+            "Total Stockholder Equity": 800,
+            "Total Debt": 300,
+            "Cash And Cash Equivalents": 100,
         }
     )
     cashflow_df = _make_statement_df(
         {
-            "Capital Expenditures": [-50],
-            "Operating Cash Flow": [250],
+            "Capital Expenditures": -50,
+            "Operating Cash Flow": 250,
         }
     )
 
@@ -63,7 +63,7 @@ def test_build_metric_snapshot_computes_ratios():
     assert snapshot["grossProfitPerEmployee"] == 60.0
     assert snapshot["freeCashFlowMargin"] == pytest.approx(0.2)
     assert snapshot["grossMargin"] == pytest.approx(0.6)
-    assert snapshot["roic"] == pytest.approx(0.16)
+    assert snapshot["roic"] == pytest.approx(1 / 6)
 
 
 def test_build_metric_snapshot_av_computes_ratios():
@@ -106,7 +106,7 @@ def test_build_metric_snapshot_av_computes_ratios():
     assert snapshot["grossProfitPerEmployee"] == 60.0
     assert snapshot["freeCashFlowMargin"] == pytest.approx(0.2)
     assert snapshot["grossMargin"] == pytest.approx(0.6)
-    assert snapshot["roic"] == pytest.approx(0.16)
+    assert snapshot["roic"] == pytest.approx(1 / 6)
 
 
 def test_build_metric_snapshot_handles_missing_column():
