@@ -141,7 +141,7 @@ def get_option_price_ratio():
 
                 # Fetch trailing PE using the fundamentals function.
                 try:
-                    fundamentals = fetch_stock_fundamentals(ticker)
+                    fundamentals = fetch_stock_fundamentals(ticker, include_alpha=False)
                     trailing_pe = fundamentals.get("trailingPE")
                 except Exception as fe:
                     trailing_pe = None
@@ -171,4 +171,3 @@ def get_option_price_ratio():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-

@@ -1,0 +1,123 @@
+{
+  "symbol": "TEST",
+  "annualReports": [],
+  "quarterlyReports": [
+    {
+      "fiscalDateEnding": "2023-09-30",
+      "reportedCurrency": "USD",
+      "totalRevenue": "255",
+      "netIncome": "52",
+      "operatingIncome": "65",
+      "incomeBeforeTax": "70",
+      "incomeTaxExpense": "15"
+    },
+    {
+      "fiscalDateEnding": "2024-06-30",
+      "reportedCurrency": "USD",
+      "totalRevenue": "250",
+      "netIncome": "50",
+      "operatingIncome": "60",
+      "incomeBeforeTax": "75",
+      "incomeTaxExpense": "15"
+    },
+    {
+      "fiscalDateEnding": "2022-03-31",
+      "reportedCurrency": "USD",
+      "totalRevenue": "205",
+      "netIncome": "41",
+      "operatingIncome": "52",
+      "incomeBeforeTax": "60",
+      "incomeTaxExpense": "12"
+    },
+    {
+      "fiscalDateEnding": "2023-12-31",
+      "reportedCurrency": "USD",
+      "totalRevenue": "260",
+      "netIncome": "54",
+      "operatingIncome": "66",
+      "incomeBeforeTax": "72",
+      "incomeTaxExpense": "14"
+    },
+    {
+      "fiscalDateEnding": "2021-09-30",
+      "reportedCurrency": "USD",
+      "totalRevenue": "195",
+      "netIncome": "39",
+      "operatingIncome": "50",
+      "incomeBeforeTax": "57",
+      "incomeTaxExpense": "11"
+    },
+    {
+      "fiscalDateEnding": "2022-12-31",
+      "reportedCurrency": "USD",
+      "totalRevenue": "230",
+      "netIncome": "46",
+      "operatingIncome": "58",
+      "incomeBeforeTax": "66",
+      "incomeTaxExpense": "13"
+    },
+    {
+      "fiscalDateEnding": "2024-03-31",
+      "reportedCurrency": "USD",
+      "totalRevenue": "240",
+      "netIncome": "48",
+      "operatingIncome": "59",
+      "incomeBeforeTax": "68",
+      "incomeTaxExpense": "14"
+    },
+    {
+      "fiscalDateEnding": "2021-06-30",
+      "reportedCurrency": "USD",
+      "totalRevenue": "190",
+      "netIncome": "38",
+      "operatingIncome": "49",
+      "incomeBeforeTax": "55",
+      "incomeTaxExpense": "11"
+    },
+    {
+      "fiscalDateEnding": "2022-09-30",
+      "reportedCurrency": "USD",
+      "totalRevenue": "225",
+      "netIncome": "45",
+      "operatingIncome": "57",
+      "incomeBeforeTax": "64",
+      "incomeTaxExpense": "13"
+    },
+    {
+      "fiscalDateEnding": "2023-03-31",
+      "reportedCurrency": "USD",
+      "totalRevenue": "235",
+      "netIncome": "47",
+      "operatingIncome": "60",
+      "incomeBeforeTax": "67",
+      "incomeTaxExpense": "14"
+    },
+    {
+      "fiscalDateEnding": "2022-06-30",
+      "reportedCurrency": "USD",
+      "totalRevenue": "215",
+      "netIncome": "43",
+      "operatingIncome": "55",
+      "incomeBeforeTax": "62",
+      "incomeTaxExpense": "12"
+    },
+    {
+      "fiscalDateEnding": "2021-12-31",
+      "reportedCurrency": "USD",
+      "totalRevenue": "200",
+      "netIncome": "40",
+      "operatingIncome": "51",
+      "incomeBeforeTax": "58",
+      "incomeTaxExpense": "12"
+    },
+    {
+      "fiscalDateEnding": "2023-06-30",
+      "reportedCurrency": "USD",
+      "totalRevenue": "245",
+      "netIncome": "49",
+      "operatingIncome": "62",
+      "incomeBeforeTax": "69",
+      "incomeTaxExpense": "14"
+    }
+  ]
+}

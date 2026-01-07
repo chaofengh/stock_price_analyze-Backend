@@ -1,0 +1,43 @@
+{
+  "symbol": "TEST",
+  "annualReports": [
+    {
+      "fiscalDateEnding": "2023-12-31",
+      "reportedCurrency": "USD",
+      "totalAssets": "2000",
+      "totalLiabilities": "1200",
+      "totalShareholderEquity": "800",
+      "cashAndCashEquivalentsAtCarryingValue": "150",
+      "shortLongTermDebtTotal": "300"
+    },
+    {
+      "fiscalDateEnding": "2022-12-31",
+      "reportedCurrency": "USD",
+      "totalAssets": "1900",
+      "totalLiabilities": "1100",
+      "totalShareholderEquity": "800",
+      "cashAndCashEquivalentsAtCarryingValue": "140",
+      "shortLongTermDebtTotal": "280"
+    }
+  ],
+  "quarterlyReports": [
+    {
+      "fiscalDateEnding": "2024-03-31",
+      "reportedCurrency": "USD",
+      "totalAssets": "2100",
+      "totalLiabilities": "1250",
+      "totalShareholderEquity": "850",
+      "cashAndCashEquivalentsAtCarryingValue": "160",
+      "shortLongTermDebtTotal": "320"
+    },
+    {
+      "fiscalDateEnding": "2023-12-31",
+      "reportedCurrency": "USD",
+      "totalAssets": "2050",
+      "totalLiabilities": "1220",
+      "totalShareholderEquity": "830",
+      "cashAndCashEquivalentsAtCarryingValue": "155",
+      "shortLongTermDebtTotal": "310"
+    }
+  ]
+}

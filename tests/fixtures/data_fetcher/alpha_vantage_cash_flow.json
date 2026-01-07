@@ -1,0 +1,35 @@
+{
+  "symbol": "TEST",
+  "annualReports": [
+    {
+      "fiscalDateEnding": "2023-12-31",
+      "reportedCurrency": "USD",
+      "operatingCashflow": "400",
+      "capitalExpenditures": "-50",
+      "cashflowFromInvestment": "-70"
+    },
+    {
+      "fiscalDateEnding": "2022-12-31",
+      "reportedCurrency": "USD",
+      "operatingCashflow": "380",
+      "capitalExpenditures": "-45",
+      "cashflowFromInvestment": "-65"
+    }
+  ],
+  "quarterlyReports": [
+    {
+      "fiscalDateEnding": "2024-03-31",
+      "reportedCurrency": "USD",
+      "operatingCashflow": "95",
+      "capitalExpenditures": "-12",
+      "cashflowFromInvestment": "-18"
+    },
+    {
+      "fiscalDateEnding": "2023-12-31",
+      "reportedCurrency": "USD",
+      "operatingCashflow": "100",
+      "capitalExpenditures": "-13",
+      "cashflowFromInvestment": "-20"
+    }
+  ]
+}
