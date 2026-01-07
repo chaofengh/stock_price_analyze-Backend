@@ -3,15 +3,16 @@ data_fetcher_financials.py
 Purpose: fetch and cache financial statements from Alpha Vantage.
 """
 import os
+import threading
+import time
+from collections import deque
+
 import requests
 from dotenv import load_dotenv
 from utils.ttl_cache import TTLCache
 from .data_fetcher_utils import normalize_symbol
 from .financials_alpha import is_alpha_vantage_error, has_financial_reports
-from .financials_helpers import (
-    compute_partial_year_reports,
-    compute_annual_from_quarters,
-)
+from .financials_helpers import compute_annual_from_quarters, compute_partial_year_reports
 from .financials_yfinance import build_income_annual_from_yfinance
 
 load_dotenv()
@@ -22,6 +23,53 @@ _FINANCIALS_CACHE = TTLCache(ttl_seconds=60 * 60 * 6, max_size=512)
 _FINANCIALS_EMPTY_CACHE = TTLCache(ttl_seconds=60 * 5, max_size=512)
 _NO_DATA = object()
 
+_AV_RATE_WINDOW_SECONDS = int(os.environ.get("ALPHA_VANTAGE_WINDOW_SECONDS", "60"))
+_AV_RATE_MAX_CALLS = int(os.environ.get("ALPHA_VANTAGE_MAX_CALLS_PER_WINDOW", "4"))
+_AV_DISABLE_SECONDS = int(
+    os.environ.get("ALPHA_VANTAGE_DISABLE_SECONDS", str(60 * 60 * 24))
+)
+_AV_CALL_TIMES = deque()
+_AV_DISABLED_UNTIL = 0.0
+_AV_RATE_LOCK = threading.Lock()
+
+_build_income_annual_from_yfinance = build_income_annual_from_yfinance
+
+
+def _is_alpha_vantage_rate_limit(payload) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    note = payload.get("Note") or payload.get("Information")
+    if not note:
+        return False
+    note_lower = str(note).lower()
+    return "api call frequency" in note_lower or "call frequency" in note_lower
+
+
+def _alpha_vantage_allow_request() -> bool:
+    now = time.time()
+    with _AV_RATE_LOCK:
+        if _AV_DISABLED_UNTIL and now < _AV_DISABLED_UNTIL:
+            return False
+        if _AV_RATE_MAX_CALLS <= 0:
+            return False
+        if _AV_RATE_WINDOW_SECONDS > 0:
+            while _AV_CALL_TIMES and (now - _AV_CALL_TIMES[0]) > _AV_RATE_WINDOW_SECONDS:
+                _AV_CALL_TIMES.popleft()
+            if len(_AV_CALL_TIMES) >= _AV_RATE_MAX_CALLS:
+                return False
+        _AV_CALL_TIMES.append(now)
+        return True
+
+
+def _alpha_vantage_disable_for_window():
+    global _AV_DISABLED_UNTIL
+    if _AV_DISABLE_SECONDS <= 0:
+        return
+    now = time.time()
+    with _AV_RATE_LOCK:
+        disabled_until = now + _AV_DISABLE_SECONDS
+        if disabled_until > _AV_DISABLED_UNTIL:
+            _AV_DISABLED_UNTIL = disabled_until
 
 def fetch_financials(symbol: str, statements=None) -> dict:
     """
@@ -71,18 +119,22 @@ def fetch_financials(symbol: str, statements=None) -> dict:
             "https://www.alphavantage.co/query"
             f"?function={function_name}&symbol={symbol}&apikey={alpha_vantage_api_key}"
         )
-        try:
-            response = requests.get(url, timeout=8)
-            if response.status_code != 200:
-                raise Exception(f"Error fetching {statement} data: {response.status_code}")
-            data = response.json()
-        except Exception:
-            if statement == "income_statement":
-                data = {}
-            else:
-                raise
+        data = {}
+        if _alpha_vantage_allow_request():
+            try:
+                response = requests.get(url, timeout=8)
+                if response.status_code != 200:
+                    raise Exception(f"Error fetching {statement} data: {response.status_code}")
+                data = response.json()
+            except Exception:
+                if statement == "income_statement":
+                    data = {}
+                else:
+                    raise
         if not isinstance(data, dict):
             data = {}
+        if _is_alpha_vantage_rate_limit(data):
+            _alpha_vantage_disable_for_window()
 
         if "annualReports" in data:
             if isinstance(data["annualReports"], list):
@@ -115,7 +167,7 @@ def fetch_financials(symbol: str, statements=None) -> dict:
 
         if statement == "income_statement":
             if is_alpha_vantage_error(data) or not data.get("annualReports"):
-                fallback_annual = build_income_annual_from_yfinance(symbol)
+                fallback_annual = _build_income_annual_from_yfinance(symbol)
                 if fallback_annual:
                     data.pop("Note", None)
                     data.pop("Error Message", None)

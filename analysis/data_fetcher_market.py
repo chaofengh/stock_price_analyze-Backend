@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from .financials_yfinance import build_income_annual_from_yfinance
+
 
 def fetch_stock_data(symbols, period="4mo", interval="1d"):
     if isinstance(symbols, str):
@@ -133,3 +135,7 @@ def fetch_stock_option_data(
         "stock_price": latest_price,
         "option_data": {"calls": calls_df, "puts": puts_df},
     }
+
+
+def _build_income_annual_from_yfinance(symbol: str) -> list:
+    return build_income_annual_from_yfinance(symbol)
