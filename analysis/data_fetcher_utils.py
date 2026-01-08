@@ -64,31 +64,59 @@ def get_info_value(info, keys):
     return None
 
 
+def _is_missing(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, (float, np.floating)):
+        return not np.isfinite(value)
+    return False
+
+
+def _merge_info(primary, secondary):
+    merged = {}
+    if isinstance(primary, dict):
+        for key, value in primary.items():
+            if not _is_missing(value):
+                merged[key] = value
+    if isinstance(secondary, dict):
+        for key, value in secondary.items():
+            if not _is_missing(value) and key not in merged:
+                merged[key] = value
+    return merged
+
+
 def get_ticker_info(ticker):
-    info = {}
+    info_from_get = {}
+    info_from_prop = {}
     try:
         if hasattr(ticker, "get_info"):
-            info = ticker.get_info() or {}
+            info_from_get = ticker.get_info() or {}
     except Exception:
-        info = {}
-    if not info:
-        try:
-            info = ticker.info or {}
-        except Exception:
-            info = {}
-    return info if isinstance(info, dict) else {}
+        info_from_get = {}
+    try:
+        info_from_prop = ticker.info or {}
+    except Exception:
+        info_from_prop = {}
+    if not info_from_get and not info_from_prop:
+        return {}
+    return _merge_info(info_from_get, info_from_prop)
 
 
 def get_fast_info(ticker):
-    fast_info = {}
+    fast_from_get = {}
+    fast_from_prop = {}
     try:
         if hasattr(ticker, "get_fast_info"):
-            fast_info = ticker.get_fast_info() or {}
-        else:
-            fast_info = ticker.fast_info or {}
+            fast_from_get = ticker.get_fast_info() or {}
     except Exception:
-        fast_info = {}
-    return fast_info if isinstance(fast_info, dict) else {}
+        fast_from_get = {}
+    try:
+        fast_from_prop = ticker.fast_info or {}
+    except Exception:
+        fast_from_prop = {}
+    if not fast_from_get and not fast_from_prop:
+        return {}
+    return _merge_info(fast_from_get, fast_from_prop)
 
 
 def get_price_from_history(ticker):

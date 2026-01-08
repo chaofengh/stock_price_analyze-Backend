@@ -10,6 +10,7 @@ from collections import deque
 import requests
 from dotenv import load_dotenv
 from utils.ttl_cache import TTLCache
+from database.financials_repository import get_financial_statement, upsert_financial_statement
 from .data_fetcher_utils import normalize_symbol
 from .financials_alpha import is_alpha_vantage_error, has_financial_reports
 from .financials_helpers import compute_annual_from_quarters, compute_partial_year_reports
@@ -75,9 +76,6 @@ def fetch_financials(symbol: str, statements=None) -> dict:
     """
     Fetch financial statements (income, balance sheet, cash flow).
     """
-    if not alpha_vantage_api_key:
-        raise ValueError("Missing 'alpha_vantage_api_key' in environment")
-
     symbol = normalize_symbol(symbol)
 
     valid_types = {
@@ -114,11 +112,32 @@ def fetch_financials(symbol: str, statements=None) -> dict:
             financials[statement] = cached_empty
             continue
 
+        db_payload = None
+        try:
+            db_payload = get_financial_statement(symbol, statement)
+        except Exception:
+            db_payload = None
+
+        if isinstance(db_payload, dict):
+            if db_payload.get("symbol") is None:
+                db_payload["symbol"] = symbol
+            if has_financial_reports(db_payload):
+                _FINANCIALS_CACHE.set(cache_key, db_payload)
+            else:
+                _FINANCIALS_EMPTY_CACHE.set(cache_key, db_payload)
+            financials[statement] = db_payload
+            continue
+
+        if not alpha_vantage_api_key:
+            raise ValueError("Missing 'alpha_vantage_api_key' in environment")
+
         function_name = valid_types[statement]
         url = (
             "https://www.alphavantage.co/query"
             f"?function={function_name}&symbol={symbol}&apikey={alpha_vantage_api_key}"
         )
+        fetched = False
+        source = "alpha_vantage"
         data = {}
         if _alpha_vantage_allow_request():
             try:
@@ -126,6 +145,7 @@ def fetch_financials(symbol: str, statements=None) -> dict:
                 if response.status_code != 200:
                     raise Exception(f"Error fetching {statement} data: {response.status_code}")
                 data = response.json()
+                fetched = True
             except Exception:
                 if statement == "income_statement":
                     data = {}
@@ -173,12 +193,20 @@ def fetch_financials(symbol: str, statements=None) -> dict:
                     data.pop("Error Message", None)
                     data.pop("Information", None)
                     data["annualReports"] = fallback_annual[:3]
+                    fetched = True
+                    source = "yfinance"
 
         data["symbol"] = symbol
         if has_financial_reports(data):
             _FINANCIALS_CACHE.set(cache_key, data)
         else:
             _FINANCIALS_EMPTY_CACHE.set(cache_key, data)
+
+        if fetched and not is_alpha_vantage_error(data):
+            try:
+                upsert_financial_statement(symbol, statement, data, source=source)
+            except Exception:
+                pass
         financials[statement] = data
 
     return financials

@@ -11,17 +11,31 @@ def test_fetch_stock_fundamentals_uses_alt_symbol(monkeypatch):
     mock_load = Mock(
         side_effect=[
             {},
+            {},
             {"trailingPE": 12.0},
         ]
     )
-    mock_empty = Mock(side_effect=[True, False])
+    mock_empty = Mock(side_effect=[True, True, False])
     monkeypatch.setattr(fundamentals, "load_fundamentals", mock_load)
     monkeypatch.setattr(fundamentals, "is_empty_fundamentals", mock_empty)
 
     result = fundamentals.fetch_stock_fundamentals("brk.b")
     assert result["trailingPE"] == 12.0
     assert mock_load.call_args_list[0].args[0] == "BRK.B"
-    assert mock_load.call_args_list[1].args[0] == "BRK-B"
+    assert mock_load.call_args_list[1].args[0] == "BRK.B"
+    assert mock_load.call_args_list[2].args[0] == "BRK-B"
+
+
+def test_fetch_stock_fundamentals_retries_same_symbol(monkeypatch):
+    mock_load = Mock(side_effect=[{}, {"trailingPE": 8.0}])
+    mock_empty = Mock(side_effect=[True, False])
+    monkeypatch.setattr(fundamentals, "load_fundamentals", mock_load)
+    monkeypatch.setattr(fundamentals, "is_empty_fundamentals", mock_empty)
+
+    result = fundamentals.fetch_stock_fundamentals("AAPL")
+    assert result["trailingPE"] == 8.0
+    assert mock_load.call_args_list[0].args[0] == "AAPL"
+    assert mock_load.call_args_list[1].args[0] == "AAPL"
 
 
 def test_fetch_peers_handles_errors(monkeypatch):

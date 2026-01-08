@@ -195,10 +195,13 @@ def summary_fundamentals_endpoint():
             if cached is not None:
                 FUNDAMENTALS_CACHE.delete(symbol)
             payload = convert_to_python_types(get_summary_fundamentals(symbol))
-            if not _is_empty_fundamentals(payload):
-                FUNDAMENTALS_CACHE.set(symbol, payload)
+            if _is_empty_fundamentals(payload):
+                return _pending_response(symbol, status_code=200)
+            FUNDAMENTALS_CACHE.set(symbol, payload)
             return jsonify(payload), 200
         payload = convert_to_python_types(get_summary_fundamentals(symbol))
+        if _is_empty_fundamentals(payload):
+            return _pending_response(symbol, status_code=200)
         return jsonify(payload), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -213,6 +216,16 @@ def summary_peer_averages_endpoint():
     """
     symbol = _get_symbol()
     try:
+        fundamentals = None
+        if _use_cache():
+            fundamentals = _read_cache(FUNDAMENTALS_CACHE, symbol)
+        if fundamentals is None or _is_empty_fundamentals(fundamentals):
+            fundamentals = convert_to_python_types(get_summary_fundamentals(symbol))
+            if _is_empty_fundamentals(fundamentals):
+                return _pending_response(symbol, status_code=200)
+            if _use_cache():
+                FUNDAMENTALS_CACHE.set(symbol, fundamentals)
+
         if _use_cache():
             cached = _read_cache(PEER_AVG_CACHE, symbol)
             if cached is not None and _payload_has_any(cached, _PEER_AVG_KEYS):

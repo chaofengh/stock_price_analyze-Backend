@@ -28,3 +28,27 @@ def test_summary_endpoint(mock_summary, client):
 def test_get_unknown_route(client):
     response = client.get('/api/not-a-real-route')
     assert response.status_code == 404
+
+
+@patch('routes.summary_routes.get_summary_fundamentals')
+def test_summary_fundamentals_pending_when_empty(mock_fundamentals, client):
+    mock_fundamentals.return_value = {}
+    response = client.get('/api/summary/fundamentals?symbol=FAKE')
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data['status'] == 'pending'
+
+
+@patch('routes.summary_routes.get_summary_peer_averages')
+@patch('routes.summary_routes.get_summary_fundamentals')
+def test_summary_peer_averages_pending_without_fundamentals(
+    mock_fundamentals,
+    mock_peer_averages,
+    client,
+):
+    mock_fundamentals.return_value = {}
+    response = client.get('/api/summary/peer-averages?symbol=FAKE')
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data['status'] == 'pending'
+    mock_peer_averages.assert_not_called()
