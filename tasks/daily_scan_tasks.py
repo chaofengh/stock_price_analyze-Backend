@@ -1,4 +1,5 @@
 # tasks/daily_scan_tasks.py
+from __future__ import annotations
 import threading
 from datetime import datetime, time as dtime, timedelta
 import pytz

@@ -7,6 +7,7 @@ from analysis.summary import (
     get_summary_fundamentals,
     get_summary_peer_averages,
 )
+from analysis.data_fetcher_fundamentals_extract import is_empty_fundamentals
 from utils.serialization import convert_to_python_types
 from .summary_cache import (
     SUMMARY_CACHE,
@@ -53,29 +54,21 @@ def _pending_response(symbol: str, status_code: int = 200):
     }), status_code
 
 
-def _is_empty_fundamentals(payload) -> bool:
-    if not isinstance(payload, dict):
-        return True
-    for key in (
-        "trailingPE",
-        "forwardPE",
-        "PEG",
-        "PGI",
-        "dividendYield",
-        "beta",
-        "marketCap",
-    ):
-        if payload.get(key) is not None:
-            return False
-    return True
-
-
 _PEER_AVG_KEYS = (
     "avg_peer_trailingPE",
     "avg_peer_forwardPE",
     "avg_peer_PEG",
     "avg_peer_PGI",
     "avg_peer_beta",
+)
+_VALUATION_KEYS = (
+    "trailingPE",
+    "forwardPE",
+    "PEG",
+    "PGI",
+    "dividendYield",
+    "beta",
+    "marketCap",
 )
 _OVERVIEW_KEYS = (
     "trailingPE",
@@ -92,6 +85,10 @@ def _payload_has_any(payload: dict, keys: tuple) -> bool:
     if not isinstance(payload, dict):
         return False
     return any(payload.get(key) is not None for key in keys)
+
+
+def _has_valuation_metrics(payload: dict) -> bool:
+    return _payload_has_any(payload, _VALUATION_KEYS)
 
 
 def _has_peer_info(payload: dict) -> bool:
@@ -190,17 +187,17 @@ def summary_fundamentals_endpoint():
     try:
         if _use_cache():
             cached = _read_cache(FUNDAMENTALS_CACHE, symbol)
-            if cached is not None and not _is_empty_fundamentals(cached):
+            if cached is not None and not is_empty_fundamentals(cached):
                 return jsonify(cached), 200
             if cached is not None:
                 FUNDAMENTALS_CACHE.delete(symbol)
             payload = convert_to_python_types(get_summary_fundamentals(symbol))
-            if _is_empty_fundamentals(payload):
+            if is_empty_fundamentals(payload):
                 return _pending_response(symbol, status_code=200)
             FUNDAMENTALS_CACHE.set(symbol, payload)
             return jsonify(payload), 200
         payload = convert_to_python_types(get_summary_fundamentals(symbol))
-        if _is_empty_fundamentals(payload):
+        if is_empty_fundamentals(payload):
             return _pending_response(symbol, status_code=200)
         return jsonify(payload), 200
     except Exception as e:
@@ -219,9 +216,9 @@ def summary_peer_averages_endpoint():
         fundamentals = None
         if _use_cache():
             fundamentals = _read_cache(FUNDAMENTALS_CACHE, symbol)
-        if fundamentals is None or _is_empty_fundamentals(fundamentals):
+        if fundamentals is None or not _has_valuation_metrics(fundamentals):
             fundamentals = convert_to_python_types(get_summary_fundamentals(symbol))
-            if _is_empty_fundamentals(fundamentals):
+            if not _has_valuation_metrics(fundamentals):
                 return _pending_response(symbol, status_code=200)
             if _use_cache():
                 FUNDAMENTALS_CACHE.set(symbol, fundamentals)

@@ -74,6 +74,21 @@ def get_summary_fundamentals(symbol: str) -> dict:
         "dividendYield": fundamentals.get("dividendYield"),
         "beta": fundamentals.get("beta"),
         "marketCap": fundamentals.get("marketCap"),
+        "revenuePerEmployee": fundamentals.get("revenuePerEmployee"),
+        "grossProfitPerEmployee": fundamentals.get("grossProfitPerEmployee"),
+        "operatingIncomePerEmployee": fundamentals.get("operatingIncomePerEmployee"),
+        "sgaPerEmployee": fundamentals.get("sgaPerEmployee"),
+        "salesPerSalesperson": fundamentals.get("salesPerSalesperson"),
+        "roic": fundamentals.get("roic"),
+        "roa": fundamentals.get("roa"),
+        "assetTurnover": fundamentals.get("assetTurnover"),
+        "capexIntensity": fundamentals.get("capexIntensity"),
+        "freeCashFlowMargin": fundamentals.get("freeCashFlowMargin"),
+        "grossMargin": fundamentals.get("grossMargin"),
+        "operatingMargin": fundamentals.get("operatingMargin"),
+        "sgaPercentRevenue": fundamentals.get("sgaPercentRevenue"),
+        "rdPercentRevenue": fundamentals.get("rdPercentRevenue"),
+        "metricTrends": fundamentals.get("metricTrends"),
     }
 
 

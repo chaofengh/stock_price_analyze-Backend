@@ -15,7 +15,7 @@ def test_fetch_stock_fundamentals_uses_alt_symbol(monkeypatch):
             {"trailingPE": 12.0},
         ]
     )
-    mock_empty = Mock(side_effect=[True, True, False])
+    mock_empty = Mock(side_effect=lambda payload: not payload)
     monkeypatch.setattr(fundamentals, "load_fundamentals", mock_load)
     monkeypatch.setattr(fundamentals, "is_empty_fundamentals", mock_empty)
 

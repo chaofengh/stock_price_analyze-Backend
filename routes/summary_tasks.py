@@ -4,6 +4,7 @@ from analysis.summary import (
     get_summary_fundamentals,
     get_summary_peer_averages,
 )
+from analysis.data_fetcher_fundamentals_extract import is_empty_fundamentals
 from utils.serialization import convert_to_python_types
 from .summary_cache import (
     SUMMARY_CACHE,
@@ -19,23 +20,6 @@ _PEER_AVG_KEYS = (
     "avg_peer_PGI",
     "avg_peer_beta",
 )
-
-
-def _is_empty_fundamentals(payload) -> bool:
-    if not isinstance(payload, dict):
-        return True
-    for key in (
-        "trailingPE",
-        "forwardPE",
-        "PEG",
-        "PGI",
-        "dividendYield",
-        "beta",
-        "marketCap",
-    ):
-        if payload.get(key) is not None:
-            return False
-    return True
 
 
 def _payload_has_any(payload: dict, keys: tuple) -> bool:
@@ -69,7 +53,7 @@ def compute_fundamentals_async(symbol: str):
         payload = convert_to_python_types(get_summary_fundamentals(symbol))
         if isinstance(payload, dict):
             payload["symbol"] = symbol
-        if not _is_empty_fundamentals(payload):
+        if not is_empty_fundamentals(payload):
             FUNDAMENTALS_CACHE.set(symbol, payload)
     finally:
         FUNDAMENTALS_CACHE.finish_inflight(symbol)

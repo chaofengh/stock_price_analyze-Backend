@@ -6,6 +6,8 @@ Pseudocode:
 2) For each peer, map time -> close into JSON-friendly records.
 3) Return a dict keyed by peer symbol.
 """
+from __future__ import annotations
+
 from typing import Dict, List
 import pandas as pd
 from .data_fetcher import fetch_stock_data

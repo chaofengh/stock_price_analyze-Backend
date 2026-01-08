@@ -6,6 +6,7 @@ Pseudocode:
 2) Calculate accuracy as ratio of "good" outcomes.
 3) Return a flat dict of aggregate values.
 """
+from __future__ import annotations
 
 def _mean(values: list[float]) -> float | None:
     if not values:

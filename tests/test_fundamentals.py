@@ -3,16 +3,16 @@
 import pytest
 from unittest.mock import patch
 from analysis.fundamentals import (
-    get_fundamentals, 
-    get_peers, 
-    get_peers_fundamentals, 
-    compute_peer_metric_avg, 
-    compare_metric
+    get_fundamentals,
+    get_peers,
+    get_peers_fundamentals,
+    compute_peer_metric_avg,
+    compare_metric,
 )
 
-@patch('analysis.fundamentals.fetch_stock_fundamentals')
-def test_get_fundamentals(mock_fetch):
-    mock_fetch.return_value = {"trailingPE": 10.0, "beta": 1.2}
+@patch('analysis.fundamentals.load_fundamentals')
+def test_get_fundamentals(mock_load):
+    mock_load.return_value = {"trailingPE": 10.0, "beta": 1.2}
     result = get_fundamentals("FAKE")
     assert result['trailingPE'] == 10.0
     assert result['beta'] == 1.2

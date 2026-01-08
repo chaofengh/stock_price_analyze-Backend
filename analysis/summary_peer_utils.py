@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from utils.ttl_cache import TTLCache
@@ -32,8 +34,11 @@ def _valid_close(value) -> bool:
 def _build_peer_entry(df: pd.DataFrame, require_first: bool = True) -> dict | None:
     if df is None or df.empty or "close" not in df.columns:
         return None
-    first_close = df.iloc[0]["close"]
-    last_close = df.iloc[-1]["close"]
+    close_series = df["close"].dropna()
+    if close_series.empty:
+        return None
+    first_close = close_series.iloc[0]
+    last_close = close_series.iloc[-1]
     if not _valid_close(first_close):
         if require_first:
             return None

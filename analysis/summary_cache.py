@@ -3,7 +3,8 @@ summary_cache.py
 Purpose: cache fundamentals and peer lists for summary endpoints.
 """
 from utils.ttl_cache import TTLCache
-from .fundamentals import get_fundamentals, get_peers
+from .fundamentals import get_fundamentals, get_fundamentals_light, get_peers
+from .data_fetcher_fundamentals_extract import is_empty_fundamentals
 
 _FUNDAMENTALS_CACHE = TTLCache(ttl_seconds=60 * 60 * 12, max_size=512)
 _PEERS_CACHE = TTLCache(ttl_seconds=60 * 60 * 12, max_size=512)
@@ -18,9 +19,7 @@ def normalize_symbol(symbol: str) -> str:
 
 
 def _is_empty_fundamentals(payload: dict) -> bool:
-    if not payload:
-        return True
-    return not any(val is not None for val in payload.values())
+    return is_empty_fundamentals(payload)
 
 
 def _cached_lookup(key, cache, empty_cache, fetch_fn, is_empty):
@@ -66,6 +65,6 @@ def get_cached_peer_fundamentals(symbol: str) -> dict:
         sym,
         _PEER_FUNDAMENTALS_CACHE,
         _PEER_FUNDAMENTALS_EMPTY_CACHE,
-        lambda: get_fundamentals(sym),
+        lambda: get_fundamentals_light(sym),
         _is_empty_fundamentals,
     )

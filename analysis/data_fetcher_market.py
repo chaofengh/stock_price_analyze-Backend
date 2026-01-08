@@ -49,10 +49,19 @@ def fetch_stock_data(symbols, period="4mo", interval="1d"):
             "Low": "low",
             "Volume": "volume",
         }
+        close_source = None
         if "Adj Close" in ticker_df.columns:
-            rename_dict["Adj Close"] = "close"
-        elif "Close" in ticker_df.columns:
-            rename_dict["Close"] = "close"
+            adj_close = ticker_df["Adj Close"]
+            if adj_close.notna().any():
+                close_source = "Adj Close"
+        if "Close" in ticker_df.columns:
+            close_col = ticker_df["Close"]
+            if close_source is None:
+                close_source = "Close"
+            elif close_col.notna().sum() > ticker_df[close_source].notna().sum():
+                close_source = "Close"
+        if close_source:
+            rename_dict[close_source] = "close"
 
         ticker_df.rename(columns=rename_dict, inplace=True)
         ticker_df["date"] = pd.to_datetime(ticker_df["date"])
@@ -60,7 +69,11 @@ def fetch_stock_data(symbols, period="4mo", interval="1d"):
         ticker_df.reset_index(drop=True, inplace=True)
 
         ticker_df.replace({None: np.nan, np.inf: np.nan, -np.inf: np.nan}, inplace=True)
-        ticker_df.dropna(axis=0, how="any", inplace=True)
+        required_cols = ["close"] if "close" in ticker_df.columns else []
+        if required_cols:
+            ticker_df.dropna(axis=0, how="any", subset=required_cols, inplace=True)
+        else:
+            ticker_df.dropna(axis=0, how="any", inplace=True)
 
         data_dict[original_sym] = ticker_df
 
