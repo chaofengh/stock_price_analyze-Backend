@@ -25,7 +25,7 @@ def get_peer_info(
         return peer_info  # nothing to do
 
     # Bulk-fetch data for efficiency
-    peer_data = fetch_stock_data(peers, period=period, interval=interval)
+    peer_data = fetch_stock_data(peers, period=period, interval=interval, require_ohlc=False)
 
     def _time_column(df: pd.DataFrame) -> str | None:
         if "date" in df.columns:

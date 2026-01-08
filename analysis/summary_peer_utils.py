@@ -62,7 +62,7 @@ def _build_peer_info(peers: list) -> dict:
     if not peers:
         return peer_info
 
-    peer_data = fetch_stock_data(peers, period="1d", interval="5m")
+    peer_data = fetch_stock_data(peers, period="1d", interval="5m", require_ohlc=False)
     missing_peers = []
 
     for peer_symbol in peers:
@@ -73,7 +73,7 @@ def _build_peer_info(peers: list) -> dict:
             peer_info[peer_symbol] = entry
 
     if missing_peers:
-        daily_data = fetch_stock_data(missing_peers, period="5d", interval="1d")
+        daily_data = fetch_stock_data(missing_peers, period="5d", interval="1d", require_ohlc=False)
         for peer_symbol in missing_peers:
             entry = _build_peer_entry(daily_data.get(peer_symbol), require_first=False)
             if entry is None:

@@ -9,7 +9,7 @@ import yfinance as yf
 from .financials_yfinance import build_income_annual_from_yfinance
 
 
-def fetch_stock_data(symbols, period="4mo", interval="1d"):
+def fetch_stock_data(symbols, period="4mo", interval="1d", require_ohlc: bool = True):
     if isinstance(symbols, str):
         symbols = [symbols]
 
@@ -69,7 +69,10 @@ def fetch_stock_data(symbols, period="4mo", interval="1d"):
         ticker_df.reset_index(drop=True, inplace=True)
 
         ticker_df.replace({None: np.nan, np.inf: np.nan, -np.inf: np.nan}, inplace=True)
-        required_cols = ["close"] if "close" in ticker_df.columns else []
+        if require_ohlc:
+            required_cols = [col for col in ("open", "high", "low", "close") if col in ticker_df.columns]
+        else:
+            required_cols = ["close"] if "close" in ticker_df.columns else []
         if required_cols:
             ticker_df.dropna(axis=0, how="any", subset=required_cols, inplace=True)
         else:
