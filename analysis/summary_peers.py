@@ -3,27 +3,25 @@ summary_peers.py
 Purpose: build fundamentals and peer comparison payloads for summary endpoints.
 """
 from concurrent.futures import ThreadPoolExecutor
-from utils.ttl_cache import TTLCache
-from .summary_cache import normalize_symbol, get_cached_fundamentals, get_cached_peers
+from .data_fetcher_utils import normalize_symbol
+from .fundamentals import get_fundamentals, get_peers
 from .summary_peer_utils import (
     PEER_METRICS,
     normalize_peers,
-    get_cached_peer_info,
+    get_peer_info,
     get_peer_metric_averages,
 )
 
 _MAX_PEERS = 6
 _PEER_AVG_MAX_PEERS = 12
-_PEER_AVG_CACHE = TTLCache(ttl_seconds=60 * 10, max_size=512)
-_NO_DATA = object()
 
 
 def get_summary_overview(symbol: str) -> dict:
     symbol = normalize_symbol(symbol)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        fundamentals_future = executor.submit(get_cached_fundamentals, symbol)
-        peers_future = executor.submit(get_cached_peers, symbol)
+        fundamentals_future = executor.submit(get_fundamentals, symbol)
+        peers_future = executor.submit(get_peers, symbol)
 
         fundamentals = fundamentals_future.result()
         peers = peers_future.result()
@@ -53,9 +51,12 @@ def get_summary_overview(symbol: str) -> dict:
 
 def get_summary_peers(symbol: str) -> dict:
     symbol = normalize_symbol(symbol)
-    peers = get_cached_peers(symbol)
-    peers = normalize_peers(symbol, peers, max_peers=_MAX_PEERS)
-    peer_info = get_cached_peer_info(peers)
+    peers = get_peers(symbol)
+    peers = normalize_peers(symbol, peers, max_peers=_PEER_AVG_MAX_PEERS)
+    peer_info = get_peer_info(peers)
+    ordered_peers = [p for p in peers if peer_info.get(p, {}).get("latest_price") is not None]
+    ordered_peers = ordered_peers[:_MAX_PEERS]
+    peer_info = {peer: peer_info[peer] for peer in ordered_peers}
     return {
         "symbol": symbol,
         "peer_info": peer_info,
@@ -64,7 +65,7 @@ def get_summary_peers(symbol: str) -> dict:
 
 def get_summary_fundamentals(symbol: str) -> dict:
     symbol = normalize_symbol(symbol)
-    fundamentals = get_cached_fundamentals(symbol)
+    fundamentals = get_fundamentals(symbol)
     return {
         "symbol": symbol,
         "trailingPE": fundamentals.get("trailingPE"),
@@ -98,18 +99,14 @@ def get_summary_peer_averages(symbol: str) -> dict:
     def _compute():
         peers = normalize_peers(
             symbol,
-            get_cached_peers(symbol),
+            get_peers(symbol),
             max_peers=_PEER_AVG_MAX_PEERS,
         )
         if not peers:
             return {f"avg_peer_{metric}": None for metric in PEER_METRICS}
         return get_peer_metric_averages(peers)
 
-    peer_avgs = _PEER_AVG_CACHE.get(symbol, _NO_DATA)
-    if peer_avgs is _NO_DATA:
-        peer_avgs = _compute()
-        if any(peer_avgs.get(f"avg_peer_{metric}") is not None for metric in PEER_METRICS):
-            _PEER_AVG_CACHE.set(symbol, peer_avgs)
+    peer_avgs = _compute()
     return {
         "symbol": symbol,
         "avg_peer_trailingPE": peer_avgs.get("avg_peer_trailingPE"),

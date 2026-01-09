@@ -127,9 +127,6 @@ def fetch_stock_fundamentals(symbol: str, include_alpha: bool = True) -> dict:
     fundamentals = {}
     for candidate in symbol_candidates(symbol):
         fundamentals = load_fundamentals(candidate, include_alpha=include_alpha)
-        if is_empty_fundamentals(fundamentals):
-            # yfinance can return partial/empty metadata on the first call; retry once.
-            fundamentals = load_fundamentals(candidate, include_alpha=include_alpha)
         if not is_empty_fundamentals(fundamentals):
             break
 

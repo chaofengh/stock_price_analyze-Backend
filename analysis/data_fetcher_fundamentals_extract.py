@@ -96,10 +96,14 @@ def extract_fundamentals(info, fast_info, statements=None):
 
     if forward_pe is not None and trailing_pe is not None and trailing_pe != 0:
         pgi = forward_pe / trailing_pe
+    elif trailing_eps is not None and forward_eps is not None and forward_eps != 0:
+        pgi = trailing_eps / forward_eps
     else:
         pgi = None
 
     trailing_peg = info_float("trailingPegRatio")
+    if peg is None:
+        peg = trailing_peg
     dividend_yield = info_float("dividendYield")
     beta = info_float("beta")
     market_cap = info_float("marketCap")

@@ -136,3 +136,22 @@ def test_is_empty_fundamentals():
     assert is_empty_fundamentals({}) is True
     assert is_empty_fundamentals({"trailingPE": None, "beta": None}) is True
     assert is_empty_fundamentals({"trailingPE": 10.0}) is False
+
+
+def test_extract_fundamentals_peg_falls_back_to_trailing_peg():
+    info = {
+        "trailingPegRatio": 1.2,
+        "forwardPE": None,
+        "earningsGrowth": None,
+    }
+    result = extract_fundamentals(info, {}, statements={})
+    assert result["PEG"] == pytest.approx(1.2)
+
+
+def test_extract_fundamentals_pgi_falls_back_to_eps():
+    info = {
+        "trailingEps": 4.0,
+        "forwardEps": 5.0,
+    }
+    result = extract_fundamentals(info, {}, statements={})
+    assert result["PGI"] == pytest.approx(0.8)

@@ -17,6 +17,13 @@ def test_get_fundamentals(mock_load):
     assert result['trailingPE'] == 10.0
     assert result['beta'] == 1.2
 
+
+@patch('analysis.fundamentals.load_fundamentals')
+def test_get_fundamentals_raises_when_empty(mock_load):
+    mock_load.return_value = {}
+    with pytest.raises(ValueError):
+        get_fundamentals("FAKE")
+
 @patch('analysis.fundamentals.fetch_peers')
 def test_get_peers(mock_peers):
     mock_peers.return_value = ["SYM1", "SYM2"]

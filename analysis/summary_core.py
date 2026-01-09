@@ -6,7 +6,7 @@ from .data_preparation import prepare_stock_data
 from .event_detection_analysis import get_touch_and_hug_events, compute_bounces_and_pullbacks
 from .metrics_calculation import compute_aggregates
 from .chart_builder import build_chart_data
-from .summary_cache import normalize_symbol
+from .data_fetcher_utils import normalize_symbol
 
 
 def _trim_window(results: dict) -> dict:

@@ -13,17 +13,11 @@ from .data_fetcher_utils import normalize_symbol, symbol_candidates
 def get_fundamentals(symbol: str, include_alpha: bool = True) -> dict:
     """Return full fundamentals dict or empty dict on error."""
     symbol = normalize_symbol(symbol)
-    fundamentals = {}
-    try:
-        for candidate in symbol_candidates(symbol):
-            fundamentals = load_fundamentals(candidate, include_alpha=include_alpha)
-            if is_empty_fundamentals(fundamentals):
-                fundamentals = load_fundamentals(candidate, include_alpha=include_alpha)
-            if not is_empty_fundamentals(fundamentals):
-                break
-    except Exception:
-        fundamentals = {}
-    return fundamentals
+    for candidate in symbol_candidates(symbol):
+        fundamentals = load_fundamentals(candidate, include_alpha=include_alpha)
+        if not is_empty_fundamentals(fundamentals):
+            return fundamentals
+    raise ValueError(f"No fundamentals returned for symbol {symbol}")
 
 
 def get_fundamentals_light(symbol: str) -> dict:

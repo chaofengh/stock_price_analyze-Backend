@@ -4,11 +4,7 @@ import json
 import time
 from flask import Blueprint, Response, jsonify, request
 
-from tasks.daily_scan_tasks import (
-    get_latest_scan_result,
-    get_last_timestamp,
-    scan_updated_evt,
-)
+from tasks.daily_scan_tasks import get_latest_scan_result, scan_updated_evt
 from database.ticker_repository import get_all_tickers
 
 alerts_blueprint = Blueprint('alerts', __name__)
@@ -35,8 +31,7 @@ def _filter_for_user(result: dict, user_id: int | None) -> dict:
 @alerts_blueprint.route('/api/alerts/latest', methods=['GET'])
 def alerts_latest():
     """
-    Returns cached result.
-    Recomputes only after 16:02 CT on weekdays (or when the scheduler runs).
+    Returns the latest scan result.
     """
     user_id = request.args.get("user_id")
     try:
@@ -73,11 +68,11 @@ def alerts_stream():
                 continue
 
             scan_updated_evt.clear()
-            ts = get_last_timestamp() or ""
+            payload = _filter_for_user(
+                get_latest_scan_result(allow_refresh_if_due=False), user_id
+            )
+            ts = payload.get("timestamp") or ""
             if ts and ts != last_ts:
-                payload = _filter_for_user(
-                    get_latest_scan_result(allow_refresh_if_due=False), user_id
-                )
                 yield "event: alerts_update\n"
                 yield f"data: {json.dumps(payload)}\n\n"
                 last_ts = ts

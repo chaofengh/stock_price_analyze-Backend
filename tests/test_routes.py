@@ -30,25 +30,32 @@ def test_get_unknown_route(client):
     assert response.status_code == 404
 
 
+@patch('routes.summary_routes.get_summary_peers')
+def test_summary_peers_returns_payload(mock_peers, client):
+    mock_peers.return_value = {
+        "symbol": "FAKE",
+        "peer_info": {"AAA": {"latest_price": 101.5, "percentage_change": 1.2}},
+    }
+    response = client.get('/api/summary/peers?symbol=FAKE')
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["symbol"] == "FAKE"
+    assert data["peer_info"]["AAA"]["latest_price"] == 101.5
 @patch('routes.summary_routes.get_summary_fundamentals')
-def test_summary_fundamentals_pending_when_empty(mock_fundamentals, client):
-    mock_fundamentals.return_value = {}
+def test_summary_fundamentals_returns_payload(mock_fundamentals, client):
+    mock_fundamentals.return_value = {"symbol": "FAKE", "trailingPE": 12.5}
     response = client.get('/api/summary/fundamentals?symbol=FAKE')
     assert response.status_code == 200
     data = response.get_json()
-    assert data['status'] == 'pending'
+    assert data["symbol"] == "FAKE"
+    assert data["trailingPE"] == 12.5
 
 
 @patch('routes.summary_routes.get_summary_peer_averages')
-@patch('routes.summary_routes.get_summary_fundamentals')
-def test_summary_peer_averages_pending_without_fundamentals(
-    mock_fundamentals,
-    mock_peer_averages,
-    client,
-):
-    mock_fundamentals.return_value = {}
+def test_summary_peer_averages_returns_payload(mock_peer_averages, client):
+    mock_peer_averages.return_value = {"symbol": "FAKE", "avg_peer_trailingPE": 9.3}
     response = client.get('/api/summary/peer-averages?symbol=FAKE')
     assert response.status_code == 200
     data = response.get_json()
-    assert data['status'] == 'pending'
-    mock_peer_averages.assert_not_called()
+    assert data["symbol"] == "FAKE"
+    assert data["avg_peer_trailingPE"] == 9.3

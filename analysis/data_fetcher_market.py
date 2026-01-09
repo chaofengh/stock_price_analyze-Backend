@@ -9,7 +9,13 @@ import yfinance as yf
 from .financials_yfinance import build_income_annual_from_yfinance
 
 
-def fetch_stock_data(symbols, period="4mo", interval="1d", require_ohlc: bool = True):
+def fetch_stock_data(
+    symbols,
+    period="4mo",
+    interval="1d",
+    require_ohlc: bool = True,
+    threads: bool = True,
+):
     if isinstance(symbols, str):
         symbols = [symbols]
 
@@ -21,16 +27,28 @@ def fetch_stock_data(symbols, period="4mo", interval="1d", require_ohlc: bool = 
         interval=interval,
         group_by="ticker",
         auto_adjust=False,
-        threads=True,
+        threads=threads,
+        progress=False,
+        timeout=10,
     )
 
     data_dict = {}
+    is_single_frame = (
+        isinstance(raw_data, pd.DataFrame)
+        and not isinstance(raw_data.columns, pd.MultiIndex)
+        and len(upper_symbols) == 1
+    )
 
     for original_sym, upper_sym in zip(symbols, upper_symbols):
         try:
-            ticker_df = raw_data[upper_sym].copy()
+            if isinstance(raw_data, dict):
+                ticker_df = raw_data[upper_sym].copy()
+            elif is_single_frame:
+                ticker_df = raw_data.copy()
+            else:
+                ticker_df = raw_data[upper_sym].copy()
         except KeyError:
-            print(f"Ticker {upper_sym} not found in raw_data for user symbol {original_sym}")
+            data_dict[original_sym] = pd.DataFrame()
             continue
 
         ticker_df.reset_index(inplace=True)
@@ -69,6 +87,8 @@ def fetch_stock_data(symbols, period="4mo", interval="1d", require_ohlc: bool = 
         ticker_df.reset_index(drop=True, inplace=True)
 
         ticker_df.replace({None: np.nan, np.inf: np.nan, -np.inf: np.nan}, inplace=True)
+        if "close" in ticker_df.columns:
+            ticker_df["close"] = pd.to_numeric(ticker_df["close"], errors="coerce")
         if require_ohlc:
             required_cols = [col for col in ("open", "high", "low", "close") if col in ticker_df.columns]
         else:
