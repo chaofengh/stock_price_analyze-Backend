@@ -14,11 +14,14 @@ def build_chart_data(data, touches) -> list:
     
     chart_data = []
     for i in range(n):
+        row = data.iloc[i]
+        upper = row.get('BB_upper')
+        lower = row.get('BB_lower')
         chart_data.append({
-            'date': data.loc[i, 'date'].strftime('%Y-%m-%d'),
-            'close': float(data.loc[i, 'close']),
-            'upper': float(data.loc[i, 'BB_upper']) if not pd.isna(data.loc[i, 'BB_upper']) else None,
-            'lower': float(data.loc[i, 'BB_lower']) if not pd.isna(data.loc[i, 'BB_lower']) else None,
+            'date': row['date'].strftime('%Y-%m-%d'),
+            'close': float(row['close']),
+            'upper': float(upper) if upper is not None and not pd.isna(upper) else None,
+            'lower': float(lower) if lower is not None and not pd.isna(lower) else None,
             'isTouch': (i in touch_indices),
         })
     return chart_data

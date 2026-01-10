@@ -97,6 +97,7 @@ def fetch_stock_data(
             ticker_df.dropna(axis=0, how="any", subset=required_cols, inplace=True)
         else:
             ticker_df.dropna(axis=0, how="any", inplace=True)
+        ticker_df.reset_index(drop=True, inplace=True)
 
         data_dict[original_sym] = ticker_df
 

@@ -10,13 +10,21 @@ import pandas as pd
 from .data_fetcher import fetch_stock_data
 from .indicators import compute_bollinger_bands, compute_rsi
 
-def prepare_stock_data(symbols, include_rsi: bool = True) -> dict:
+def prepare_stock_data(
+    symbols,
+    include_rsi: bool = True,
+    period: str = "4mo",
+    interval: str = "1d",
+) -> dict:
     """
     Fetch data and compute indicators for one or many symbols.
     """
-    data_dict = fetch_stock_data(symbols)
+    data_dict = fetch_stock_data(symbols, period=period, interval=interval)
 
     for symbol, df in data_dict.items():
+        if df is None or df.empty or "close" not in df.columns:
+            data_dict[symbol] = df
+            continue
         df = compute_bollinger_bands(df)
         if include_rsi:
             df = compute_rsi(df)
@@ -32,10 +40,10 @@ def get_trading_period(data):
     if n == 0:
         return "No data", None, None
 
-    start_date_str = data.loc[0, 'date'].strftime('%Y-%m-%d')
-    end_date_str   = data.loc[n-1, 'date'].strftime('%Y-%m-%d')
+    start_date_str = data['date'].iloc[0].strftime('%Y-%m-%d')
+    end_date_str   = data['date'].iloc[-1].strftime('%Y-%m-%d')
     analysis_period = f"{start_date_str} to {end_date_str}"
 
-    initial_price = float(data.loc[0, 'close'])
-    final_price = float(data.loc[n-1, 'close'])
+    initial_price = float(data['close'].iloc[0])
+    final_price = float(data['close'].iloc[-1])
     return analysis_period, initial_price, final_price

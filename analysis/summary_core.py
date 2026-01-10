@@ -2,11 +2,28 @@
 summary_core.py
 Purpose: build the full chart/metrics summary for a ticker.
 """
+import pandas as pd
 from .data_preparation import prepare_stock_data
 from .event_detection_analysis import get_touch_and_hug_events, compute_bounces_and_pullbacks
 from .metrics_calculation import compute_aggregates
 from .chart_builder import build_chart_data
-from .data_fetcher_utils import normalize_symbol
+from .data_fetcher_utils import normalize_symbol, symbol_candidates
+
+_SUMMARY_PERIOD = "1y"
+
+
+def _load_summary_frame(symbol: str) -> pd.DataFrame:
+    for candidate in symbol_candidates(symbol):
+        data_dict = prepare_stock_data(
+            candidate,
+            include_rsi=False,
+            period=_SUMMARY_PERIOD,
+            interval="1d",
+        )
+        df = data_dict.get(candidate)
+        if df is not None and not df.empty and "close" in df.columns:
+            return df
+    return pd.DataFrame()
 
 
 def _trim_window(results: dict) -> dict:
@@ -33,16 +50,12 @@ def _trim_aggregates(aggregates: dict) -> dict:
 def get_summary(symbol: str) -> dict:
     symbol = normalize_symbol(symbol)
 
-    data_dict = prepare_stock_data(symbol, include_rsi=False)
-    if symbol not in data_dict:
-        raise ValueError(f"No data found for symbol {symbol}")
-    df = data_dict[symbol]
+    df = _load_summary_frame(symbol)
     if df.empty:
         raise ValueError(f"No data found for symbol {symbol}")
 
-    n = len(df)
-    initial_price = float(df.loc[0, "close"])
-    final_price = float(df.loc[n - 1, "close"])
+    initial_price = float(df["close"].iloc[0])
+    final_price = float(df["close"].iloc[-1])
 
     touches, hug_events_upper, hug_events_lower = get_touch_and_hug_events(
         df,
