@@ -66,6 +66,15 @@ def test_extract_fundamentals_derives_metrics_from_info_and_statements():
     assert result["metricTrends"] is not None
 
 
+def test_extract_fundamentals_parses_employee_strings_with_commas():
+    info = {
+        "fullTimeEmployees": "2,000",
+        "totalRevenue": 1_000_000,
+    }
+    result = extract_fundamentals(info, {}, statements={})
+    assert result["revenuePerEmployee"] == pytest.approx(500.0)
+
+
 def test_extract_fundamentals_uses_alpha_quarterly_for_roic():
     alpha_financials = {
         "income_statement": {

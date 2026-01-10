@@ -7,6 +7,11 @@ def safe_float(value):
     try:
         if value is None:
             return None
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned or cleaned.lower() in ("none", "nan", "na", "n/a", "null"):
+                return None
+            value = cleaned.replace(",", "")
         value = float(value)
     except Exception:
         return None

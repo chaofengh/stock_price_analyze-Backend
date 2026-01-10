@@ -8,7 +8,8 @@ def create_tickers_table():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS tickers (
                     id SERIAL PRIMARY KEY,
-                    symbol VARCHAR(10) NOT NULL
+                    symbol VARCHAR(10) NOT NULL UNIQUE,
+                    logo_url_base64 TEXT
                 );
             """)
             conn.commit()

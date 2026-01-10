@@ -2,6 +2,7 @@ from flask import Blueprint, jsonify, request
 
 from analysis.summary import (
     get_summary,
+    get_summary_bundle,
     get_summary_overview,
     get_summary_peers,
     get_summary_fundamentals,
@@ -87,6 +88,21 @@ def summary_peer_averages_endpoint():
     symbol = _get_symbol()
     try:
         payload = convert_to_python_types(get_summary_peer_averages(symbol))
+        return jsonify(payload), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@summary_blueprint.route("/api/summary/bundle", methods=["GET"])
+def summary_bundle_endpoint():
+    """
+    Full summary payload (chart + fundamentals + peers + peer averages).
+    Example usage:
+      GET /api/summary/bundle?symbol=QQQ
+    """
+    symbol = _get_symbol()
+    try:
+        payload = convert_to_python_types(get_summary_bundle(symbol))
         return jsonify(payload), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500

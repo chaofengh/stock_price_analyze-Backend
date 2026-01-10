@@ -113,8 +113,6 @@ def extract_fundamentals(info, fast_info, statements=None):
     if market_cap is None and current_price and shares_outstanding:
         market_cap = current_price * shares_outstanding
     price_to_book = info_float("priceToBook")
-    forward_eps = forward_eps
-    trailing_eps = trailing_eps
     debt_to_equity = info_float("debtToEquity")
 
     employees = info_float("fullTimeEmployees")
@@ -278,8 +276,6 @@ def extract_fundamentals(info, fast_info, statements=None):
     capex_intensity = safe_div(abs(capex) if capex is not None else None, revenue)
     free_cash_flow_margin = safe_div(free_cash_flow, revenue)
     gross_margin = safe_div(gross_profit, revenue)
-    if gross_margin is None and revenue is not None and cogs is not None:
-        gross_margin = safe_div(revenue - cogs, revenue)
     operating_margin = safe_div(operating_income, revenue)
     sga_percent_revenue = safe_div(sga, revenue)
     rd_percent_revenue = safe_div(rd, revenue)

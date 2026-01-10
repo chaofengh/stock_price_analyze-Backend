@@ -43,6 +43,11 @@ def safe_float(value):
     if value is None:
         return None
     try:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned or cleaned.lower() in ("none", "nan", "na", "n/a", "null"):
+                return None
+            value = cleaned.replace(",", "")
         value = float(value)
     except (TypeError, ValueError):
         return None

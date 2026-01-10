@@ -5,6 +5,7 @@ Purpose: build fundamentals and peer comparison payloads for summary endpoints.
 from concurrent.futures import ThreadPoolExecutor
 from .data_fetcher_utils import normalize_symbol
 from .fundamentals import get_fundamentals, get_peers
+from .summary_core import get_summary
 from .summary_peer_utils import (
     PEER_METRICS,
     normalize_peers,
@@ -109,6 +110,47 @@ def get_summary_peer_averages(symbol: str) -> dict:
     peer_avgs = _compute()
     return {
         "symbol": symbol,
+        "avg_peer_trailingPE": peer_avgs.get("avg_peer_trailingPE"),
+        "avg_peer_forwardPE": peer_avgs.get("avg_peer_forwardPE"),
+        "avg_peer_PEG": peer_avgs.get("avg_peer_PEG"),
+        "avg_peer_PGI": peer_avgs.get("avg_peer_PGI"),
+        "avg_peer_beta": peer_avgs.get("avg_peer_beta"),
+    }
+
+
+def get_summary_bundle(symbol: str) -> dict:
+    symbol = normalize_symbol(symbol)
+    summary = get_summary(symbol)
+    peers = normalize_peers(symbol, get_peers(symbol), max_peers=_PEER_AVG_MAX_PEERS)
+    peer_info = get_peer_info(peers[:_MAX_PEERS])
+    fundamentals = get_fundamentals(symbol)
+    peer_avgs = get_peer_metric_averages(peers, max_workers=3)
+
+    return {
+        **summary,
+        "peer_info": peer_info,
+        "trailingPE": fundamentals.get("trailingPE"),
+        "forwardPE": fundamentals.get("forwardPE"),
+        "PEG": fundamentals.get("PEG"),
+        "PGI": fundamentals.get("PGI"),
+        "dividendYield": fundamentals.get("dividendYield"),
+        "beta": fundamentals.get("beta"),
+        "marketCap": fundamentals.get("marketCap"),
+        "revenuePerEmployee": fundamentals.get("revenuePerEmployee"),
+        "grossProfitPerEmployee": fundamentals.get("grossProfitPerEmployee"),
+        "operatingIncomePerEmployee": fundamentals.get("operatingIncomePerEmployee"),
+        "sgaPerEmployee": fundamentals.get("sgaPerEmployee"),
+        "salesPerSalesperson": fundamentals.get("salesPerSalesperson"),
+        "roic": fundamentals.get("roic"),
+        "roa": fundamentals.get("roa"),
+        "assetTurnover": fundamentals.get("assetTurnover"),
+        "capexIntensity": fundamentals.get("capexIntensity"),
+        "freeCashFlowMargin": fundamentals.get("freeCashFlowMargin"),
+        "grossMargin": fundamentals.get("grossMargin"),
+        "operatingMargin": fundamentals.get("operatingMargin"),
+        "sgaPercentRevenue": fundamentals.get("sgaPercentRevenue"),
+        "rdPercentRevenue": fundamentals.get("rdPercentRevenue"),
+        "metricTrends": fundamentals.get("metricTrends"),
         "avg_peer_trailingPE": peer_avgs.get("avg_peer_trailingPE"),
         "avg_peer_forwardPE": peer_avgs.get("avg_peer_forwardPE"),
         "avg_peer_PEG": peer_avgs.get("avg_peer_PEG"),

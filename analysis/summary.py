@@ -4,6 +4,7 @@ Facade for summary builders (kept for backwards-compatible imports).
 """
 from .summary_core import get_summary
 from .summary_peers import (
+    get_summary_bundle,
     get_summary_overview,
     get_summary_peers,
     get_summary_fundamentals,
@@ -12,6 +13,7 @@ from .summary_peers import (
 
 __all__ = [
     "get_summary",
+    "get_summary_bundle",
     "get_summary_overview",
     "get_summary_peers",
     "get_summary_fundamentals",

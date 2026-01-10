@@ -25,6 +25,7 @@ def test_safe_float_and_div():
     assert safe_float(float("nan")) is None
     assert safe_float(float("inf")) is None
     assert safe_float("10.5") == 10.5
+    assert safe_float("12,345") == 12345.0
     assert safe_div(None, 2) is None
     assert safe_div(1, 0) is None
     assert safe_div(10, 2) == 5

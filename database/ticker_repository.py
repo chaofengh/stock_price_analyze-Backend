@@ -230,3 +230,4 @@ def update_logo_base64_for_symbol(symbol, logo_base64):
     finally:
         if conn:
             conn.close()
+

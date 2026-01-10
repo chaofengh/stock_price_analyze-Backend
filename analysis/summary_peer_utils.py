@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional
 import pandas as pd
 from .data_fetcher import fetch_stock_data
 from .data_fetcher_utils import normalize_symbol
@@ -86,13 +87,16 @@ def get_peer_info(peers: list) -> dict:
     return _build_peer_info(peers)
 
 
-def get_peer_metric_averages(peers: list) -> dict:
+def get_peer_metric_averages(peers: list, max_workers: Optional[int] = None) -> dict:
     totals = {metric: 0.0 for metric in PEER_METRICS}
     counts = {metric: 0 for metric in PEER_METRICS}
     if not peers:
         return {f"avg_peer_{metric}": None for metric in PEER_METRICS}
 
-    max_workers = min(8, len(peers))
+    if max_workers is None:
+        max_workers = min(8, len(peers))
+    else:
+        max_workers = max(1, min(max_workers, len(peers)))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(get_fundamentals_light, peer): peer for peer in peers}
         for future in as_completed(futures):
