@@ -20,17 +20,28 @@ def fetch_stock_data(
         symbols = [symbols]
 
     upper_symbols = [sym.upper() for sym in symbols]
+    threads = threads and len(upper_symbols) > 1
 
-    raw_data = yf.download(
-        tickers=" ".join(upper_symbols),
-        period=period,
-        interval=interval,
-        group_by="ticker",
-        auto_adjust=False,
-        threads=threads,
-        progress=False,
-        timeout=10,
-    )
+    try:
+        raw_data = yf.download(
+            tickers=" ".join(upper_symbols),
+            period=period,
+            interval=interval,
+            group_by="ticker",
+            auto_adjust=False,
+            threads=threads,
+            progress=False,
+            timeout=10,
+        )
+    except Exception:
+        raw_data = pd.DataFrame()
+    if len(upper_symbols) == 1 and isinstance(raw_data, pd.DataFrame) and raw_data.empty:
+        ticker = yf.Ticker(upper_symbols[0])
+        raw_data = ticker.history(
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+        )
 
     data_dict = {}
     is_single_frame = (
