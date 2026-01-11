@@ -141,6 +141,29 @@ def test_extract_fundamentals_uses_alpha_quarterly_for_roic():
     assert result["metricTrends"]["roic"]["recent"] != []
 
 
+def test_extract_fundamentals_uses_metric_series_for_sga_outputs():
+    alpha_financials = {
+        "income_statement": {
+            "quarterlyReports": [
+                {
+                    "fiscalDateEnding": "2024-06-30",
+                    "totalRevenue": "1000",
+                    "sellingGeneralAdministrative": "50",
+                }
+            ]
+        },
+        "balance_sheet": {"quarterlyReports": [{"fiscalDateEnding": "2024-06-30"}]},
+        "cash_flow": {"quarterlyReports": [{"fiscalDateEnding": "2024-06-30"}]},
+    }
+    result = extract_fundamentals(
+        info={"fullTimeEmployees": 10},
+        fast_info={},
+        statements={"alpha_financials": alpha_financials},
+    )
+    assert result["sgaPerEmployee"] == pytest.approx(20.0)
+    assert result["sgaPercentRevenue"] == pytest.approx(0.05)
+
+
 def test_is_empty_fundamentals():
     assert is_empty_fundamentals({}) is True
     assert is_empty_fundamentals({"trailingPE": None, "beta": None}) is True

@@ -449,9 +449,35 @@ def extract_fundamentals(info, fast_info, statements=None):
                 series.extend([prior_snapshot.get(metric_key)] * (8 - len(series)))
 
     metric_trends = {key: split_trends(series) for key, series in metric_series.items()}
-
-    if roic is None:
-        roic = latest_series_value(metric_series.get("roic") or [])
+    metric_values = {
+        key: latest_series_value(metric_series.get(key) or []) for key in _METRIC_KEYS
+    }
+    if metric_values.get("revenuePerEmployee") is not None:
+        revenue_per_employee = metric_values["revenuePerEmployee"]
+    if metric_values.get("grossProfitPerEmployee") is not None:
+        gross_profit_per_employee = metric_values["grossProfitPerEmployee"]
+    if metric_values.get("operatingIncomePerEmployee") is not None:
+        operating_income_per_employee = metric_values["operatingIncomePerEmployee"]
+    if metric_values.get("sgaPerEmployee") is not None:
+        sga_per_employee = metric_values["sgaPerEmployee"]
+    if metric_values.get("roic") is not None:
+        roic = metric_values["roic"]
+    if metric_values.get("roa") is not None:
+        roa = metric_values["roa"]
+    if metric_values.get("assetTurnover") is not None:
+        asset_turnover = metric_values["assetTurnover"]
+    if metric_values.get("capexIntensity") is not None:
+        capex_intensity = metric_values["capexIntensity"]
+    if metric_values.get("freeCashFlowMargin") is not None:
+        free_cash_flow_margin = metric_values["freeCashFlowMargin"]
+    if metric_values.get("grossMargin") is not None:
+        gross_margin = metric_values["grossMargin"]
+    if metric_values.get("operatingMargin") is not None:
+        operating_margin = metric_values["operatingMargin"]
+    if metric_values.get("sgaPercentRevenue") is not None:
+        sga_percent_revenue = metric_values["sgaPercentRevenue"]
+    if metric_values.get("rdPercentRevenue") is not None:
+        rd_percent_revenue = metric_values["rdPercentRevenue"]
 
     return {
         "trailingPE": trailing_pe,
