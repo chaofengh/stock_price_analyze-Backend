@@ -1,20 +1,51 @@
 #conftest.py
 import os
 from dotenv import load_dotenv
-from unittest.mock import patch, MagicMock
 import pytest
+
+from app import create_app
+from database.connection import get_connection
+from database.create_user_table import create_users_table
+from database.create_ticker_table import create_tickers_table
+from database.create_lists_table import create_lists_and_list_tickers_tables
 
 # Load environment variables from .env (if exists)
 load_dotenv()
 
-# Override DATABASE_URL to avoid accidental real DB connections
-os.environ["DATABASE_URL"] = "postgresql://dummy:dummy@localhost/dummy"
+def _resolve_db_url():
+    return os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL")
 
-# IMPORTANT: Patch the database connection before any imports that might trigger it.
-connection_patch = patch('database.connection.get_connection', return_value=MagicMock())
-connection_patch.start()
+@pytest.fixture(scope="session")
+def db_url():
+    """
+    Provide the database URL for integration tests.
+    Prefer TEST_DATABASE_URL when set.
+    """
+    db_url = _resolve_db_url()
+    if not db_url:
+        pytest.skip("DATABASE_URL or TEST_DATABASE_URL must be set to run DB integration tests.")
+    os.environ["DATABASE_URL"] = db_url
+    return db_url
 
-from app import create_app
+@pytest.fixture(scope="session")
+def db_setup(db_url):
+    """
+    Ensure required tables exist for DB integration tests.
+    """
+    create_users_table()
+    create_tickers_table()
+    create_lists_and_list_tickers_tables()
+
+@pytest.fixture
+def db_connection(db_setup):
+    """
+    Real database connection for integration tests.
+    """
+    conn = get_connection()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 @pytest.fixture(scope="session")
 def app():
@@ -26,8 +57,6 @@ def app():
     flask_app = create_app(testing=True)
     flask_app.testing = True
     yield flask_app
-    # Stop patching after tests are complete
-    connection_patch.stop()
 
 @pytest.fixture
 def client(app):

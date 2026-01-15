@@ -1,16 +1,5 @@
-import pytest
-from unittest.mock import patch
-from datetime import datetime, timezone, timedelta
+import uuid
 from database import user_repository
-
-@pytest.fixture
-def mock_conn():
-    """
-    Fixture to patch out the actual DB connection used by user_repository.
-    """
-    with patch("database.user_repository.get_connection") as mocked_get_connection:
-        mocked_conn = mocked_get_connection.return_value
-        yield mocked_conn
 
 def test_hash_and_verify_password():
     plain_password = "TestPassword123!"
@@ -19,31 +8,30 @@ def test_hash_and_verify_password():
     assert user_repository.verify_password(plain_password, hashed)
     assert not user_repository.verify_password("WrongPassword", hashed)
 
-def test_create_and_find_user(mock_conn):
+def test_create_and_find_user(db_connection):
     """
-    Test user creation and then finding by email/username, 
-    using mock_conn so no real DB is involved.
+    Test user creation and then finding by email/username using a real DB connection.
     """
-    # Setup the rows that should come back from fetchone() calls:
-    # 1) after create_user does an INSERT + SELECT
-    # 2) after find_user_by_email_or_username
-    mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
-    mock_cursor.fetchone.side_effect = [
-        (1, "testuser@example.com", "testuser", datetime.now(timezone.utc)),  # create_user result
-        (1, "testuser@example.com", "testuser", datetime.now(timezone.utc))     # find_user_by_email_or_username
-    ]
-
-    email = "testuser@example.com"
-    username = "testuser"
+    suffix = uuid.uuid4().hex[:8]
+    email = f"testuser_{suffix}@example.com"
+    username = f"testuser_{suffix}"
     password = "TestPassword123!"
 
-    user = user_repository.create_user(email, username, password)
-    assert user is not None
-    # user is a tuple: (id, email, username, created_at)
-    assert user[1] == email
-    assert user[2] == username
+    user_id = None
+    try:
+        user = user_repository.create_user(email, username, password)
+        assert user is not None
+        # user is a tuple: (id, email, username, created_at)
+        user_id = user[0]
+        assert user[1] == email
+        assert user[2] == username
 
-    found = user_repository.find_user_by_email_or_username(email)
-    assert found is not None
-    assert found[1] == email
-    assert found[2] == username
+        found = user_repository.find_user_by_email_or_username(email)
+        assert found is not None
+        assert found[1] == email
+        assert found[2] == username
+    finally:
+        if user_id is not None:
+            with db_connection.cursor() as cur:
+                cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+            db_connection.commit()
