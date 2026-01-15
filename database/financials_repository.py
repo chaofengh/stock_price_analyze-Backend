@@ -37,9 +37,9 @@ def get_financial_statement(symbol: str, statement_type: str):
             payload = row[0]
             if isinstance(payload, str):
                 try:
-                    return json.loads(payload)
+                    payload = json.loads(payload)
                 except Exception:
-                    return None
+                    payload = None
             return payload
     finally:
         conn.close()
