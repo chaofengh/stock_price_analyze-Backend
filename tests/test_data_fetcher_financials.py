@@ -106,3 +106,25 @@ def test_fetch_financials_invalid_statement(monkeypatch):
     monkeypatch.setattr(financials, "alpha_vantage_api_key", "test")
     with pytest.raises(ValueError):
         financials.fetch_financials("AAPL", statements="not_a_real_statement")
+
+
+def test_fetch_financials_attaches_quarter_info(monkeypatch):
+    payload = _load_fixture("alpha_vantage_income_statement.json")
+    quarter_info = {
+        "mostRecentQuarter": "2025-11-30",
+        "lastFiscalYearEnd": "2025-05-31",
+        "mostRecentQuarterLabel": "Q2",
+    }
+    monkeypatch.setattr(financials, "alpha_vantage_api_key", "test")
+    monkeypatch.setattr(financials, "get_financial_statement", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        financials.requests, "get", lambda _url, timeout=8: _FakeResponse(payload)
+    )
+    monkeypatch.setattr(financials, "get_fiscal_quarter_info", lambda _symbol: quarter_info)
+
+    result = financials.fetch_financials("AAPL", statements="income_statement")
+    data = result["income_statement"]
+
+    assert data["mostRecentQuarter"] == "2025-11-30"
+    assert data["lastFiscalYearEnd"] == "2025-05-31"
+    assert data["mostRecentQuarterLabel"] == "Q2"

@@ -12,6 +12,7 @@ from database.financials_repository import get_financial_statement, upsert_finan
 from .data_fetcher_utils import normalize_symbol
 from .financials_alpha import is_alpha_vantage_error, has_financial_reports
 from .financials_helpers import compute_annual_from_quarters, compute_partial_year_reports
+from .financials_yfinance import get_fiscal_quarter_info
 
 load_dotenv()
 
@@ -70,6 +71,16 @@ def _latest_report_date(payload: dict, key: str):
         if parsed is not None:
             dates.append(parsed)
     return max(dates) if dates else None
+
+
+def _attach_quarter_info(payload, quarter_info):
+    if not isinstance(payload, dict) or not quarter_info:
+        return payload
+    for key, value in quarter_info.items():
+        if value is None:
+            continue
+        payload.setdefault(key, value)
+    return payload
 
 
 def _is_fresh_by_reports(payload: dict, max_quarterly_age_days: int, max_annual_age_days: int) -> bool:
@@ -178,6 +189,7 @@ def fetch_financials(symbol: str, statements=None) -> dict:
                 f"Invalid statement type: {statement}. Valid options are: {list(valid_types.keys())}"
             )
 
+    quarter_info = get_fiscal_quarter_info(symbol)
     financials = {}
     for statement in requested_types:
         db_payload = None
@@ -194,12 +206,12 @@ def fetch_financials(symbol: str, statements=None) -> dict:
             if db_has_reports and _is_fresh_by_reports(
                 db_payload, max_quarterly_age_days, max_annual_age_days
             ):
-                financials[statement] = db_payload
+                financials[statement] = _attach_quarter_info(db_payload, quarter_info)
                 continue
 
         if not alpha_vantage_api_key:
             if db_has_reports:
-                financials[statement] = db_payload
+                financials[statement] = _attach_quarter_info(db_payload, quarter_info)
                 continue
             raise ValueError("Missing 'alpha_vantage_api_key' in environment")
 
@@ -208,7 +220,7 @@ def fetch_financials(symbol: str, statements=None) -> dict:
             data = _fetch_alpha_vantage_statement(symbol, statement, function_name)
         except Exception:
             if db_has_reports:
-                financials[statement] = db_payload
+                financials[statement] = _attach_quarter_info(db_payload, quarter_info)
                 continue
             raise
 
@@ -234,10 +246,10 @@ def fetch_financials(symbol: str, statements=None) -> dict:
                     upsert_financial_statement(symbol, statement, data, source="alpha_vantage")
                 except Exception:
                     pass
-                financials[statement] = data
+                financials[statement] = _attach_quarter_info(data, quarter_info)
             else:
-                financials[statement] = db_payload
+                financials[statement] = _attach_quarter_info(db_payload, quarter_info)
         else:
-            financials[statement] = db_payload or data
+            financials[statement] = _attach_quarter_info(db_payload or data, quarter_info)
 
     return financials

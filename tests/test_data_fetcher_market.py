@@ -26,10 +26,10 @@ class _FakeTicker:
 def test_build_income_annual_from_yfinance_maps_fields(monkeypatch):
     financials = pd.DataFrame(
         {
-            pd.Timestamp("2023-12-31"): [1000, 600, 200, 150],
-            pd.Timestamp("2022-12-31"): [900, 540, 180, 140],
+            pd.Timestamp("2023-12-31"): [1000, 600, 200, 250, 150],
+            pd.Timestamp("2022-12-31"): [900, 540, 180, 220, 140],
         },
-        index=["Total Revenue", "Gross Profit", "Operating Income", "Net Income"],
+        index=["Total Revenue", "Gross Profit", "Operating Income", "EBITDA", "Net Income"],
     )
     fake_ticker = _FakeTicker(financials, [], None, pd.DataFrame())
     monkeypatch.setattr(market.yf, "Ticker", lambda symbol: fake_ticker)
@@ -39,6 +39,7 @@ def test_build_income_annual_from_yfinance_maps_fields(monkeypatch):
     assert reports[0]["fiscalDateEnding"] == "2023-12-31"
     assert reports[0]["totalRevenue"] == "1000"
     assert reports[0]["operatingIncome"] == "200"
+    assert reports[0]["ebitda"] == "250"
     assert reports[0]["netIncome"] == "150"
 
 
