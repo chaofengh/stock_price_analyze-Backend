@@ -11,11 +11,25 @@ def create_users_table():
                     email VARCHAR(255) UNIQUE NOT NULL,
                     username VARCHAR(50) UNIQUE NOT NULL,
                     password_hash VARCHAR(255) NOT NULL,
+                    first_name VARCHAR(80),
+                    last_name VARCHAR(80),
+                    phone VARCHAR(30),
+                    country VARCHAR(64),
+                    timezone VARCHAR(64),
+                    marketing_opt_in BOOLEAN NOT NULL DEFAULT FALSE,
                     reset_token VARCHAR(255),
                     reset_token_expires TIMESTAMP,
                     created_at TIMESTAMP DEFAULT NOW()
                 );
             """)
+            # If the table already existed, CREATE TABLE IF NOT EXISTS won't add new columns.
+            # Keep this idempotent for local/dev/test environments.
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name VARCHAR(80);")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name VARCHAR(80);")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(30);")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS country VARCHAR(64);")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone VARCHAR(64);")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS marketing_opt_in BOOLEAN NOT NULL DEFAULT FALSE;")
             conn.commit()
     finally:
         conn.close()

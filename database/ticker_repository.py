@@ -2,6 +2,13 @@
 from .connection import get_connection
 import psycopg2
 
+DEFAULT_WATCHLIST_TICKERS = [
+    "TSLA", "PLTR", "NFLX", "AMD", "MU", "CRWD", "SHOP", "META", "GS",
+    "NVDA", "PYPL", "SPOT", "ABNB", "CRM", "UBER", "ZM", "TGT", "ADBE", "AMZN",
+    "HD", "PINS", "AAPL", "BBY", "V", "COST", "WMT", "MSFT", "DIS", "SBUX",
+    "JPM", "LULU", "MCD", "T", "QQQ", "XYZ", "TQQQ", "NVDL", "SSO",
+]
+
 
 def get_all_tickers(user_id=None):
     """
@@ -31,27 +38,38 @@ def get_all_tickers(user_id=None):
 
 def create_default_user_list(user_id):
     """
-    Creates a default list for a new user and populates it with the predefined tickers.
-    Returns the ID of the new list.
+    Ensures a user's default list exists and is populated with the predefined tickers.
+    Returns the ID of the default list.
     """
-    # Define the default tickers you want every new user to have.
-    default_tickers = [
-        "TSLA", "PLTR", "NFLX", "AMD", "MU", "CRWD", "SHOP", "META", "GS",
-        "NVDA", "PYPL", "SPOT", "ABNB", "CRM", "UBER", "ZM", "TGT", "ADBE", "AMZN",
-        "HD", "PINS", "AAPL", "BBY", "V", "COST", "WMT", "MSFT", "DIS", "SBUX",
-        "JPM", "LULU", "MCD", "T", "QQQ", "XYZ", "TQQQ", "NVDL", "SSO"
-    ]
+    default_tickers = DEFAULT_WATCHLIST_TICKERS
     
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            # Create the default list for this user.
-            cur.execute("""
-                INSERT INTO lists (user_id, name, is_default)
-                VALUES (%s, %s, TRUE)
-                RETURNING id;
-            """, (user_id, "Default List"))
-            list_id = cur.fetchone()[0]
+            # Get or create the default list for this user.
+            cur.execute(
+                """
+                    SELECT id
+                    FROM lists
+                    WHERE user_id = %s AND is_default = TRUE
+                    ORDER BY id ASC
+                    LIMIT 1;
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                list_id = row[0]
+            else:
+                cur.execute(
+                    """
+                        INSERT INTO lists (user_id, name, is_default)
+                        VALUES (%s, %s, TRUE)
+                        RETURNING id;
+                    """,
+                    (user_id, "Default List"),
+                )
+                list_id = cur.fetchone()[0]
             
             # Ensure each default ticker exists in the tickers table.
             for ticker in default_tickers:
@@ -81,6 +99,42 @@ def create_default_user_list(user_id):
         conn.close()
 
 # database/ticker_repository.py
+
+def create_empty_default_user_list(user_id):
+    """
+    Ensures a user's default list exists, without pre-populating any tickers.
+    Returns the ID of the default list.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                    SELECT id
+                    FROM lists
+                    WHERE user_id = %s AND is_default = TRUE
+                    ORDER BY id ASC
+                    LIMIT 1;
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                list_id = row[0]
+            else:
+                cur.execute(
+                    """
+                        INSERT INTO lists (user_id, name, is_default)
+                        VALUES (%s, %s, TRUE)
+                        RETURNING id;
+                    """,
+                    (user_id, "Default List"),
+                )
+                list_id = cur.fetchone()[0]
+        conn.commit()
+        return list_id
+    finally:
+        conn.close()
 
 def add_ticker_to_user_list(user_id, symbol):
     """
@@ -230,4 +284,3 @@ def update_logo_base64_for_symbol(symbol, logo_base64):
     finally:
         if conn:
             conn.close()
-

@@ -6,16 +6,21 @@ from flask import Blueprint, Response, jsonify, request
 
 from tasks.daily_scan_tasks import get_latest_scan_result, scan_updated_evt
 from database.ticker_repository import get_all_tickers
+from utils.auth import AuthError, authenticate_bearer_token
 
 alerts_blueprint = Blueprint('alerts', __name__)
 
 def _filter_for_user(result: dict, user_id: int | None) -> dict:
     if user_id is None:
-        return result
+        filtered = result.copy()
+        filtered["alerts"] = []
+        return filtered
     try:
         watchlist = {t.upper() for t in (get_all_tickers(user_id=user_id) or []) if t}
     except Exception:
-        return result  # fail open
+        filtered = result.copy()
+        filtered["alerts"] = []
+        return filtered  # fail closed
 
     def _alert_symbol(alert: dict) -> str | None:
         symbol = alert.get("symbol") or alert.get("ticker")
@@ -33,14 +38,13 @@ def alerts_latest():
     """
     Returns the latest scan result.
     """
-    user_id = request.args.get("user_id")
     try:
-        user_id = int(user_id) if user_id is not None else None
-    except ValueError:
-        user_id = None
+        auth = authenticate_bearer_token(request.headers.get("Authorization"))
+    except AuthError as e:
+        return jsonify({"error": str(e)}), 401
 
     result = get_latest_scan_result(allow_refresh_if_due=True)
-    result = _filter_for_user(result, user_id)
+    result = _filter_for_user(result, auth.user_id)
     return jsonify(result), 200
 
 @alerts_blueprint.route('/api/alerts/stream', methods=['GET'])
@@ -48,15 +52,14 @@ def alerts_stream():
     """
     SSE endpoint (event-driven, low CPU).
     """
-    user_id = request.args.get("user_id")
     try:
-        user_id = int(user_id) if user_id is not None else None
-    except ValueError:
-        user_id = None
+        auth = authenticate_bearer_token(request.headers.get("Authorization"))
+    except AuthError as e:
+        return jsonify({"error": str(e)}), 401
 
     def event_stream():
         cur = get_latest_scan_result(allow_refresh_if_due=True)
-        cur = _filter_for_user(cur, user_id)
+        cur = _filter_for_user(cur, auth.user_id)
         last_ts = cur.get("timestamp") or ""
         yield "event: alerts_update\n"
         yield f"data: {json.dumps(cur)}\n\n"
@@ -69,7 +72,7 @@ def alerts_stream():
 
             scan_updated_evt.clear()
             payload = _filter_for_user(
-                get_latest_scan_result(allow_refresh_if_due=False), user_id
+                get_latest_scan_result(allow_refresh_if_due=False), auth.user_id
             )
             ts = payload.get("timestamp") or ""
             if ts and ts != last_ts:

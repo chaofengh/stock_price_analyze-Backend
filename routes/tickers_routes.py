@@ -1,7 +1,12 @@
 #tickers_routes.py
 from flask import Blueprint, jsonify, request
-from database.ticker_repository import get_all_tickers,add_ticker_to_user_list, remove_ticker_from_user_list
+from database.ticker_repository import (
+    add_ticker_to_user_list,
+    get_all_tickers,
+    remove_ticker_from_user_list,
+)
 from analysis.data_preparation import fetch_stock_data
+from utils.auth import AuthError, authenticate_bearer_token
 
 tickers_blueprint = Blueprint('tickers', __name__)
 
@@ -10,9 +15,8 @@ def get_tickers():
     """
     Returns intraday data for tickers.
     
-    If a 'user_id' query parameter is provided (e.g., ?user_id=123), 
-    only the tickers in that user's default list are returned.
-    Otherwise, it returns data for all tickers in the global table.
+    Requires an `Authorization: Bearer <token>` header and returns the
+    tickers in the authenticated user's default list.
     
     The response JSON is structured as:
       {
@@ -24,12 +28,12 @@ def get_tickers():
     (each representing a row from the intraday data DataFrame).
     """
     try:
-        # Get user_id from query parameters if available
-        user_id = request.args.get('user_id')
-        if user_id:
-            tickers = get_all_tickers(user_id=int(user_id))
-        else:
-            tickers = get_all_tickers()
+        auth = authenticate_bearer_token(request.headers.get("Authorization"))
+    except AuthError as e:
+        return jsonify({"error": str(e)}), 401
+
+    try:
+        tickers = get_all_tickers(user_id=auth.user_id)
 
         # For intraday price data, use a 1-day period and 15-minute interval.
         intraday_data = fetch_stock_data(tickers, period="1d", interval="15m")
@@ -49,23 +53,24 @@ def get_tickers():
 def add_ticker():
     """
     Expects JSON:
-      { "user_id": 123, "ticker": "TSLA" }
+      { "ticker": "TSLA" }
     or 
-      { "user_id": 123, "tickers": ["TSLA", "AAPL"] }
+      { "tickers": ["TSLA", "AAPL"] }
     """
     try:
-        data = request.get_json()
-        user_id = data.get("user_id")
-        if not user_id:
-            return jsonify({'error': 'user_id is required'}), 400
+        auth = authenticate_bearer_token(request.headers.get("Authorization"))
+    except AuthError as e:
+        return jsonify({"error": str(e)}), 401
 
+    try:
+        data = request.get_json() or {}
         # Instead of inserting globally, we add the ticker(s) to the user’s list.
         # Example: add_ticker_to_user_list(user_id, ticker)
         if "ticker" in data:
-            add_ticker_to_user_list(user_id, data["ticker"])
+            add_ticker_to_user_list(auth.user_id, data["ticker"])
         elif "tickers" in data:
             for t in data["tickers"]:
-                add_ticker_to_user_list(user_id, t)
+                add_ticker_to_user_list(auth.user_id, t)
         else:
             return jsonify({'error': 'ticker or tickers field is required'}), 400
 
@@ -78,18 +83,22 @@ def add_ticker():
 def delete_ticker():
     """
     Expects JSON:
-      { "user_id": 123, "ticker": "TSLA" }
+      { "ticker": "TSLA" }
     """
     try:
-        data = request.get_json()
-        user_id = data.get("user_id")
+        auth = authenticate_bearer_token(request.headers.get("Authorization"))
+    except AuthError as e:
+        return jsonify({"error": str(e)}), 401
+
+    try:
+        data = request.get_json() or {}
         ticker = data.get("ticker")
 
-        if not user_id or not ticker:
-            return jsonify({'error': 'user_id and ticker are required'}), 400
+        if not ticker:
+            return jsonify({'error': 'ticker is required'}), 400
 
         # Remove ticker from the user’s watchlist only
-        remove_ticker_from_user_list(user_id, ticker)
+        remove_ticker_from_user_list(auth.user_id, ticker)
         return jsonify({'status': 'deleted'}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500

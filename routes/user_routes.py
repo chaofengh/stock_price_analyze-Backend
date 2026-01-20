@@ -12,10 +12,11 @@ from database.user_repository import (
     create_user,
     find_user_by_email_or_username,
     find_user_by_email,
+    get_user_public_profile,
     verify_password,
     set_reset_token
 )
-from database.ticker_repository import create_default_user_list
+from database.ticker_repository import create_default_user_list, create_empty_default_user_list
 
 
 user_blueprint = Blueprint("user_routes", __name__)
@@ -30,13 +31,22 @@ MAIL_USE_TLS = os.getenv("MAIL_USE_TLS", "False").lower() == "true"
 # JWT configuration
 JWT_SECRET = os.getenv("JWT_SECRET", "your_jwt_secret")
 JWT_ALGORITHM = "HS256"
-JWT_EXP_DELTA_HOURS = 1
+JWT_ACCESS_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_DAYS", "30"))
 
 def sanitize_username(username: str) -> str:
     """
     Removes any character that's not alphanumeric or underscore.
     """
     return re.sub(r'[^a-zA-Z0-9_]', '', username)
+
+def _parse_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "on")
+    return False
 
 @user_blueprint.route("/register", methods=["POST"])
 def register():
@@ -47,6 +57,12 @@ def register():
       "email": "...",
       "username": "...",
       "password": "...",
+      "first_name": "...",          # optional
+      "last_name": "...",           # optional
+      "phone": "...",               # optional
+      "country": "...",             # optional
+      "timezone": "...",            # optional
+      "marketing_opt_in": false,    # optional
       "honey_trap": "",
       "form_time": <time_in_seconds>
     }
@@ -55,6 +71,12 @@ def register():
     email = (data.get("email") or "").strip()
     username = sanitize_username((data.get("username") or "").strip())
     password = (data.get("password") or "").strip()
+    first_name = (data.get("first_name") or "").strip() or None
+    last_name = (data.get("last_name") or "").strip() or None
+    phone = (data.get("phone") or "").strip() or None
+    country = (data.get("country") or "").strip() or None
+    user_timezone = (data.get("timezone") or "").strip() or None
+    marketing_opt_in = _parse_bool(data.get("marketing_opt_in"))
     honey_trap = (data.get("honey_trap") or "").strip()
     form_time = data.get("form_time")
 
@@ -78,23 +100,71 @@ def register():
         return jsonify({"error": "Password must be at least 8 characters"}), 400
     if "@" not in email:
         return jsonify({"error": "Invalid email format"}), 400
+    if first_name and len(first_name) > 80:
+        return jsonify({"error": "First name is too long"}), 400
+    if last_name and len(last_name) > 80:
+        return jsonify({"error": "Last name is too long"}), 400
+    if phone and len(phone) > 30:
+        return jsonify({"error": "Phone is too long"}), 400
+    if country and len(country) > 64:
+        return jsonify({"error": "Country is too long"}), 400
+    if user_timezone and len(user_timezone) > 64:
+        return jsonify({"error": "Timezone is too long"}), 400
 
     try:
         # 1) Create the new user
-        user = create_user(email, username, password)
-        user_id = user[0]
+        user = create_user(
+            email=email,
+            username=username,
+            password=password,
+            first_name=first_name,
+            last_name=last_name,
+            phone=phone,
+            country=country,
+            timezone=user_timezone,
+            marketing_opt_in=marketing_opt_in,
+        )
+        (
+            user_id,
+            user_email,
+            user_name,
+            created_at,
+            created_first_name,
+            created_last_name,
+            created_phone,
+            created_country,
+            created_timezone,
+            created_marketing_opt_in,
+        ) = user
 
         # 2) Create the default list for this user
-        create_default_user_list(user_id)
+        if user_email.lower() == "test@gmail.com":
+            create_default_user_list(user_id)
+        else:
+            create_empty_default_user_list(user_id)
+
+        payload = {
+            "user_id": user_id,
+            "iat": datetime.now(timezone.utc),
+            "exp": datetime.now(timezone.utc) + timedelta(days=JWT_ACCESS_TOKEN_EXPIRE_DAYS),
+        }
+        token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
         return jsonify({
             "message": "User registered successfully",
             "user": {
                 "id": user_id,
-                "email": user[1],
-                "username": user[2],
-                "created_at": user[3].isoformat() if user[3] else None
-            }
+                "email": user_email,
+                "username": user_name,
+                "first_name": created_first_name,
+                "last_name": created_last_name,
+                "phone": created_phone,
+                "country": created_country,
+                "timezone": created_timezone,
+                "marketing_opt_in": created_marketing_opt_in,
+                "created_at": created_at.isoformat() if created_at else None
+            },
+            "token": token,
         }), 201
     except Exception as e:
         err_msg = str(e)
@@ -111,8 +181,8 @@ def login():
     {
       "email_or_username": "...",
       "password": "...",
-      "honey_trap": "",
-      "form_time": <time_in_seconds>
+      "honey_trap": "",            # optional
+      "form_time": <seconds>       # optional
     }
     On successful login, a JWT token is returned.
     """
@@ -122,19 +192,18 @@ def login():
     honey_trap = (data.get("honey_trap") or "").strip()
     form_time = data.get("form_time")
 
-    if not email_or_username or not password or honey_trap is None or form_time is None:
-        return jsonify({"error": "email_or_username, password, honey_trap, and form_time are required"}), 400
+    if not email_or_username or not password:
+        return jsonify({"error": "email_or_username and password are required"}), 400
 
     if honey_trap != "":
         return jsonify({"error": "Bot detected"}), 400
 
-    try:
-        form_time = float(form_time)
-    except Exception:
-        return jsonify({"error": "Invalid form time"}), 400
-
-    if form_time < 3:
-        return jsonify({"error": "Form submitted too quickly"}), 400
+    # form_time is optional for login; ignore invalid values for compatibility.
+    if form_time is not None:
+        try:
+            float(form_time)
+        except Exception:
+            pass
 
     user_row = find_user_by_email_or_username(email_or_username)
     if not user_row:
@@ -145,19 +214,54 @@ def login():
     if not verify_password(password, password_hash):
         return jsonify({"error": "Invalid credentials"}), 401
 
+    if user_email.lower() == "test@gmail.com":
+        try:
+            create_default_user_list(user_id)
+        except Exception:
+            pass
+
     payload = {
         "user_id": user_id,
-        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXP_DELTA_HOURS)
+        "iat": datetime.now(timezone.utc),
+        "exp": datetime.now(timezone.utc) + timedelta(days=JWT_ACCESS_TOKEN_EXPIRE_DAYS),
     }
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-    return jsonify({
-        "message": "Login successful",
-        "user": {
+    profile = get_user_public_profile(user_id)
+    if profile:
+        (
+            _id,
+            _email,
+            _username,
+            _created_at,
+            _first_name,
+            _last_name,
+            _phone,
+            _country,
+            _timezone,
+            _marketing_opt_in,
+        ) = profile
+        user_payload = {
+            "id": _id,
+            "email": _email,
+            "username": _username,
+            "first_name": _first_name,
+            "last_name": _last_name,
+            "phone": _phone,
+            "country": _country,
+            "timezone": _timezone,
+            "marketing_opt_in": _marketing_opt_in,
+        }
+    else:
+        user_payload = {
             "id": user_id,
             "email": user_email,
-            "username": user_name
-        },
+            "username": user_name,
+        }
+
+    return jsonify({
+        "message": "Login successful",
+        "user": user_payload,
         "token": token
     }), 200
 

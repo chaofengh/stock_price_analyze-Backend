@@ -9,6 +9,27 @@ import yfinance as yf
 from .financials_yfinance import build_income_annual_from_yfinance
 
 
+def _price_from_underlying(underlying):
+    if not isinstance(underlying, dict):
+        return None
+    for key in (
+        "regularMarketPrice",
+        "lastPrice",
+        "mark",
+        "bid",
+        "ask",
+        "previousClose",
+    ):
+        value = underlying.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def fetch_stock_data(
     symbols,
     period="4mo",
@@ -130,14 +151,15 @@ def fetch_stock_option_data(
     3) Otherwise fetch all expirations or the first available chain.
     """
     ticker_obj = yf.Ticker(ticker)
-    stock_info = ticker_obj.history(period="1d")
-    if not stock_info.empty:
-        latest_price = float(stock_info["Close"].iloc[-1])
-    else:
-        latest_price = None
+    latest_price = None
 
     if expiration:
         chain = ticker_obj.option_chain(expiration)
+        latest_price = _price_from_underlying(getattr(chain, "underlying", None))
+        if latest_price is None:
+            stock_info = ticker_obj.history(period="1d")
+            if not stock_info.empty:
+                latest_price = float(stock_info["Close"].iloc[-1])
         calls_df = chain.calls
         puts_df = chain.puts
         if option_type == "calls":
@@ -155,6 +177,8 @@ def fetch_stock_option_data(
         all_data = {}
         for exp_date in expirations:
             chain = ticker_obj.option_chain(exp_date)
+            if latest_price is None:
+                latest_price = _price_from_underlying(getattr(chain, "underlying", None))
             calls_df = chain.calls
             puts_df = chain.puts
             if option_type == "calls":
@@ -163,6 +187,10 @@ def fetch_stock_option_data(
                 all_data[exp_date] = puts_df
             else:
                 all_data[exp_date] = {"calls": calls_df, "puts": puts_df}
+        if latest_price is None:
+            stock_info = ticker_obj.history(period="1d")
+            if not stock_info.empty:
+                latest_price = float(stock_info["Close"].iloc[-1])
         return {"ticker": ticker, "stock_price": latest_price, "option_data": all_data}
 
     available_exps = ticker_obj.options
@@ -171,6 +199,11 @@ def fetch_stock_option_data(
 
     first_exp = available_exps[0]
     chain = ticker_obj.option_chain(first_exp)
+    latest_price = _price_from_underlying(getattr(chain, "underlying", None))
+    if latest_price is None:
+        stock_info = ticker_obj.history(period="1d")
+        if not stock_info.empty:
+            latest_price = float(stock_info["Close"].iloc[-1])
     calls_df = chain.calls
     puts_df = chain.puts
 

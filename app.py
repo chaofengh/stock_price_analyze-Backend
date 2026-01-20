@@ -29,7 +29,11 @@ def create_app(testing=False):
     app = Flask(__name__)
     app.config["TESTING"] = testing
 
-    CORS(app, resources={r"/api/*": {"origins": frontend_origin}})
+    CORS(
+        app,
+        resources={r"/api/*": {"origins": frontend_origin}},
+        allow_headers=["Content-Type", "Authorization"],
+    )
 
     app.register_blueprint(summary_blueprint)
     app.register_blueprint(alerts_blueprint)
