@@ -4,6 +4,7 @@ from database.ticker_repository import (
     add_ticker_to_user_list,
     get_all_tickers,
     remove_ticker_from_user_list,
+    replace_user_watchlist,
 )
 from analysis.data_preparation import fetch_stock_data
 from utils.auth import AuthError, authenticate_bearer_token
@@ -35,8 +36,8 @@ def get_tickers():
     try:
         tickers = get_all_tickers(user_id=auth.user_id)
 
-        # For intraday price data, use a 1-day period and 15-minute interval.
-        intraday_data = fetch_stock_data(tickers, period="1d", interval="15m")
+        # For intraday price movement, use the latest trading day in 5-minute candles.
+        intraday_data = fetch_stock_data(tickers, period="1d", interval="5m")
 
         # Serialize the data: convert each DataFrame to a list of dictionaries.
         serialized_data = {}
@@ -74,6 +75,30 @@ def add_ticker():
         else:
             return jsonify({'error': 'ticker or tickers field is required'}), 400
 
+        return jsonify({'status': 'success'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@tickers_blueprint.route('/api/tickers', methods=['PUT'])
+def replace_tickers():
+    """
+    Expects JSON:
+      { "tickers": ["TSLA", "AAPL"] }
+    Replaces the user's default watchlist with the provided tickers.
+    """
+    try:
+        auth = authenticate_bearer_token(request.headers.get("Authorization"))
+    except AuthError as e:
+        return jsonify({"error": str(e)}), 401
+
+    try:
+        data = request.get_json() or {}
+        tickers = data.get("tickers")
+        if not isinstance(tickers, list):
+            return jsonify({'error': 'tickers field is required'}), 400
+
+        replace_user_watchlist(auth.user_id, tickers)
         return jsonify({'status': 'success'}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500

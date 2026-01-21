@@ -9,6 +9,50 @@ DEFAULT_WATCHLIST_TICKERS = [
     "JPM", "LULU", "MCD", "T", "QQQ", "XYZ", "TQQQ", "NVDL", "SSO",
 ]
 
+def _normalize_symbol(symbol):
+    if symbol is None:
+        return None
+    normalized = str(symbol).strip().upper()
+    return normalized if normalized else None
+
+def _normalize_symbols(symbols):
+    if not symbols:
+        return []
+    seen = set()
+    normalized = []
+    for symbol in symbols:
+        value = _normalize_symbol(symbol)
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+def _get_or_create_default_list_id(cur, user_id):
+    cur.execute(
+        """
+            SELECT id
+            FROM lists
+            WHERE user_id = %s AND is_default = TRUE
+            ORDER BY id ASC
+            LIMIT 1;
+        """,
+        (user_id,),
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0]
+
+    cur.execute(
+        """
+            INSERT INTO lists (user_id, name, is_default)
+            VALUES (%s, %s, TRUE)
+            RETURNING id;
+        """,
+        (user_id, "Default List"),
+    )
+    return cur.fetchone()[0]
+
 
 def get_all_tickers(user_id=None):
     """
@@ -46,30 +90,7 @@ def create_default_user_list(user_id):
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            # Get or create the default list for this user.
-            cur.execute(
-                """
-                    SELECT id
-                    FROM lists
-                    WHERE user_id = %s AND is_default = TRUE
-                    ORDER BY id ASC
-                    LIMIT 1;
-                """,
-                (user_id,),
-            )
-            row = cur.fetchone()
-            if row:
-                list_id = row[0]
-            else:
-                cur.execute(
-                    """
-                        INSERT INTO lists (user_id, name, is_default)
-                        VALUES (%s, %s, TRUE)
-                        RETURNING id;
-                    """,
-                    (user_id, "Default List"),
-                )
-                list_id = cur.fetchone()[0]
+            list_id = _get_or_create_default_list_id(cur, user_id)
             
             # Ensure each default ticker exists in the tickers table.
             for ticker in default_tickers:
@@ -108,29 +129,7 @@ def create_empty_default_user_list(user_id):
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                    SELECT id
-                    FROM lists
-                    WHERE user_id = %s AND is_default = TRUE
-                    ORDER BY id ASC
-                    LIMIT 1;
-                """,
-                (user_id,),
-            )
-            row = cur.fetchone()
-            if row:
-                list_id = row[0]
-            else:
-                cur.execute(
-                    """
-                        INSERT INTO lists (user_id, name, is_default)
-                        VALUES (%s, %s, TRUE)
-                        RETURNING id;
-                    """,
-                    (user_id, "Default List"),
-                )
-                list_id = cur.fetchone()[0]
+            list_id = _get_or_create_default_list_id(cur, user_id)
         conn.commit()
         return list_id
     finally:
@@ -141,6 +140,9 @@ def add_ticker_to_user_list(user_id, symbol):
     1) Ensure 'symbol' exists in the global 'tickers' table (insert if not).
     2) Insert a row into list_tickers linking the user's default list to that ticker.
     """
+    symbol = _normalize_symbol(symbol)
+    if not symbol:
+        raise ValueError("Ticker symbol is required")
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -159,22 +161,7 @@ def add_ticker_to_user_list(user_id, symbol):
             ticker_id = row[0]
 
             # Get or create the user's default list (if you always have exactly one)
-            cur.execute("""
-                SELECT id FROM lists
-                WHERE user_id = %s AND is_default = TRUE
-                LIMIT 1
-            """, (user_id,))
-            default_list = cur.fetchone()
-            if not default_list:
-                # If the user doesn't have a default list, create one
-                cur.execute("""
-                    INSERT INTO lists (user_id, name, is_default)
-                    VALUES (%s, %s, TRUE)
-                    RETURNING id
-                """, (user_id, "Default List"))
-                default_list_id = cur.fetchone()[0]
-            else:
-                default_list_id = default_list[0]
+            default_list_id = _get_or_create_default_list_id(cur, user_id)
 
             # Link the ticker to the user's default list
             cur.execute("""
@@ -196,6 +183,9 @@ def remove_ticker_from_user_list(user_id, symbol):
     Remove 'symbol' from the user's default list_tickers only.
     Does NOT remove it from the global tickers table.
     """
+    symbol = _normalize_symbol(symbol)
+    if not symbol:
+        return
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -231,6 +221,74 @@ def remove_ticker_from_user_list(user_id, symbol):
         raise e
     finally:
         conn.close()
+
+def replace_user_watchlist(user_id, symbols):
+    """
+    Replace the user's default watchlist with the provided symbols.
+    """
+    normalized_symbols = _normalize_symbols(symbols)
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            default_list_id = _get_or_create_default_list_id(cur, user_id)
+
+            if not normalized_symbols:
+                cur.execute(
+                    """
+                        DELETE FROM list_tickers
+                        WHERE list_id = %s
+                    """,
+                    (default_list_id,),
+                )
+            else:
+                for symbol in normalized_symbols:
+                    cur.execute(
+                        """
+                            INSERT INTO tickers (symbol)
+                            VALUES (%s)
+                            ON CONFLICT (symbol) DO NOTHING;
+                        """,
+                        (symbol,),
+                    )
+
+                cur.execute(
+                    """
+                        SELECT id, symbol
+                        FROM tickers
+                        WHERE symbol = ANY(%s);
+                    """,
+                    (normalized_symbols,),
+                )
+                ticker_rows = cur.fetchall()
+                ticker_ids = [row[0] for row in ticker_rows]
+                if not ticker_ids:
+                    raise Exception("Failed to resolve ticker ids for watchlist update")
+
+                for ticker_id in ticker_ids:
+                    cur.execute(
+                        """
+                            INSERT INTO list_tickers (list_id, ticker_id)
+                            VALUES (%s, %s)
+                            ON CONFLICT DO NOTHING;
+                        """,
+                        (default_list_id, ticker_id),
+                    )
+
+                cur.execute(
+                    """
+                        DELETE FROM list_tickers
+                        WHERE list_id = %s AND NOT (ticker_id = ANY(%s))
+                    """,
+                    (default_list_id, ticker_ids),
+                )
+
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+
 def get_logo_base64_for_symbol(symbol):
     """
     Returns the Base64-encoded logo for the given symbol, or None if not set.

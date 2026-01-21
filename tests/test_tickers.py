@@ -58,11 +58,12 @@ def test_get_tickers_success(client):
         return_value=AuthResult(user_id=123, payload={"user_id": 123}),
     ), patch("routes.tickers_routes.get_all_tickers", return_value=fake_tickers), patch(
         "routes.tickers_routes.fetch_stock_data", return_value=fake_data
-    ):
+    ) as mock_fetch:
         response = client.get("/api/tickers", headers={"Authorization": "Bearer test"})
         assert response.status_code == 200
         data = response.get_json()
         assert data == expected_output
+        mock_fetch.assert_called_once_with(fake_tickers, period="1d", interval="5m")
 
 def test_add_ticker_single(client):
     """
