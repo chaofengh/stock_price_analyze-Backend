@@ -3,10 +3,10 @@ from flask import Blueprint, jsonify, request
 from database.ticker_repository import (
     add_ticker_to_user_list,
     get_all_tickers,
+    get_price_movement_data,
     remove_ticker_from_user_list,
     replace_user_watchlist,
 )
-from analysis.data_preparation import fetch_stock_data
 from utils.auth import AuthError, authenticate_bearer_token
 
 tickers_blueprint = Blueprint('tickers', __name__)
@@ -35,14 +35,27 @@ def get_tickers():
 
     try:
         tickers = get_all_tickers(user_id=auth.user_id)
-
-        # For intraday price movement, use the latest trading day in 5-minute candles.
-        intraday_data = fetch_stock_data(tickers, period="1d", interval="5m")
-
-        # Serialize the data: convert each DataFrame to a list of dictionaries.
+        cached_data = get_price_movement_data(tickers)
         serialized_data = {}
-        for ticker, df in intraday_data.items():
-            serialized_data[ticker] = df.to_dict(orient='records')
+        for ticker in tickers:
+            payload = cached_data.get(ticker)
+            if isinstance(payload, list):
+                serialized_data[ticker] = {"candles": payload, "summary": {"previousClose": None}}
+                continue
+            if not isinstance(payload, dict) or not payload:
+                serialized_data[ticker] = {"candles": [], "summary": {"previousClose": None}}
+                continue
+
+            candles = payload.get("candles") if isinstance(payload.get("candles"), list) else []
+            summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+            prev_close = summary.get("previousClose")
+            if prev_close is None:
+                prev_close = summary.get("prevClose")
+
+            serialized_data[ticker] = {
+                "candles": candles,
+                "summary": {"previousClose": prev_close},
+            }
 
         return jsonify(serialized_data), 200
     except Exception as e:

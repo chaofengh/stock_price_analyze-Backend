@@ -1,6 +1,7 @@
 # database/ticker_repository.py
+import json
+from psycopg2.extras import Json
 from .connection import get_connection
-import psycopg2
 
 DEFAULT_WATCHLIST_TICKERS = [
     "TSLA", "PLTR", "NFLX", "AMD", "MU", "CRWD", "SHOP", "META", "GS",
@@ -75,6 +76,87 @@ def get_all_tickers(user_id=None):
                 """, (user_id,))
             rows = cur.fetchall()
             return [row[0] for row in rows]
+    finally:
+        conn.close()
+
+
+def get_price_movement_data(symbols):
+    normalized_symbols = _normalize_symbols(symbols)
+    if not normalized_symbols:
+        return {}
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                    SELECT symbol, price_movement_data
+                    FROM tickers
+                    WHERE symbol = ANY(%s);
+                """,
+                (normalized_symbols,),
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    results = {}
+    for symbol, payload in rows:
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = None
+        results[symbol] = payload
+    return results
+
+
+def get_symbols_for_price_movement_update(limit):
+    if not limit or limit <= 0:
+        return []
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                    SELECT t.symbol
+                    FROM tickers t
+                    JOIN list_tickers lt ON t.id = lt.ticker_id
+                    GROUP BY t.id, t.symbol, t.price_movement_updated_at
+                    ORDER BY t.price_movement_updated_at NULLS FIRST, t.symbol
+                    LIMIT %s;
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+            return [row[0] for row in rows]
+    finally:
+        conn.close()
+
+
+def upsert_price_movement_data(symbol, payload):
+    symbol = _normalize_symbol(symbol)
+    if not symbol or payload is None:
+        return
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                    INSERT INTO tickers (symbol, price_movement_data, price_movement_updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (symbol)
+                    DO UPDATE SET price_movement_data = EXCLUDED.price_movement_data,
+                                  price_movement_updated_at = EXCLUDED.price_movement_updated_at;
+                """,
+                (symbol, Json(payload)),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -309,6 +391,33 @@ def get_logo_base64_for_symbol(symbol):
     except Exception as e:
         print(f"Error fetching logo_url_base64 for symbol {symbol}:", e)
         return None
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_logos_base64_for_symbols(symbols):
+    """
+    Returns a mapping of symbol -> logo_url_base64 for the provided symbols.
+    """
+    normalized_symbols = _normalize_symbols(symbols)
+    if not normalized_symbols:
+        return {}
+    query = """
+        SELECT symbol, logo_url_base64
+        FROM tickers
+        WHERE symbol = ANY(%s);
+    """
+    conn = None
+    try:
+        conn = get_connection()
+        with conn.cursor() as cur:
+            cur.execute(query, (normalized_symbols,))
+            rows = cur.fetchall()
+            return {symbol: logo for (symbol, logo) in rows}
+    except Exception as e:
+        print("Error fetching logo_url_base64 batch:", e)
+        return {}
     finally:
         if conn:
             conn.close()

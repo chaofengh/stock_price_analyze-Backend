@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 import pytest
+import psycopg2
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -19,7 +20,14 @@ from database.create_lists_table import create_lists_and_list_tickers_tables
 load_dotenv()
 
 def _resolve_db_url():
-    return os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL")
+    return (
+        os.getenv("external_database_url")
+    )
+
+
+def _ensure_python_312():
+    if sys.version_info < (3, 12):
+        raise RuntimeError("Tests must be run with Python 3.12+.")
 
 @pytest.fixture(scope="session")
 def db_url():
@@ -27,6 +35,7 @@ def db_url():
     Provide the database URL for integration tests.
     Prefer TEST_DATABASE_URL when set.
     """
+    _ensure_python_312()
     db_url = _resolve_db_url()
     if not db_url:
         pytest.skip("DATABASE_URL or TEST_DATABASE_URL must be set to run DB integration tests.")
@@ -38,6 +47,8 @@ def db_setup(db_url):
     """
     Ensure required tables exist for DB integration tests.
     """
+    conn = get_connection()
+    conn.close()
     create_users_table()
     create_tickers_table()
     create_lists_and_list_tickers_tables()

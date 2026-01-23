@@ -21,6 +21,7 @@ from routes.world_markets_routes import world_markets_blueprint
 
 # Scheduled job wrapper
 from tasks.daily_scan_tasks import daily_scan_wrapper
+from tasks.watchlist_cache_tasks import refresh_watchlist_cache
 
 def create_app(testing=False):
     load_dotenv()
@@ -70,6 +71,13 @@ def create_scheduler(app: Flask):
         hour=16,
         minute=2,
         replace_existing=True,          # if it somehow exists, replace it
+    )
+    scheduler.add_job(
+        refresh_watchlist_cache,
+        trigger="interval",
+        id="watchlist_cache",
+        minutes=5,
+        replace_existing=True,
     )
 
     def _log(event):

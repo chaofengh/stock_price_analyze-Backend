@@ -2,6 +2,10 @@
 data_fetcher_market.py
 Purpose: fetch OHLCV data and option chains from yfinance.
 """
+import os
+import threading
+import time
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -28,6 +32,119 @@ def _price_from_underlying(underlying):
         except (TypeError, ValueError):
             continue
     return None
+
+
+_YF_RATE_LOCK = threading.Lock()
+_YF_NEXT_ALLOWED_TS = 0.0
+
+
+def _get_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    name = exc.__class__.__name__
+    if name == "YFRateLimitError":
+        return True
+    message = str(exc).lower()
+    return "rate limit" in message or "too many requests" in message
+
+
+def _apply_rate_limit_cooldown():
+    cooldown = max(0.0, _get_float_env("YF_RATE_LIMIT_COOLDOWN_SECONDS", 5.0))
+    if cooldown <= 0:
+        return
+    global _YF_NEXT_ALLOWED_TS
+    with _YF_RATE_LOCK:
+        now = time.monotonic()
+        _YF_NEXT_ALLOWED_TS = max(_YF_NEXT_ALLOWED_TS, now + cooldown)
+
+
+def _throttle_yfinance():
+    min_interval = max(0.0, _get_float_env("YF_RATE_LIMIT_SECONDS", 0.75))
+    if min_interval <= 0:
+        return
+    global _YF_NEXT_ALLOWED_TS
+    with _YF_RATE_LOCK:
+        now = time.monotonic()
+        wait = _YF_NEXT_ALLOWED_TS - now
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+        _YF_NEXT_ALLOWED_TS = now + min_interval
+
+
+def _option_chain_with_retry(ticker_obj, expiration: str):
+    retries = max(0, _get_int_env("YF_OPTION_RETRIES", 2))
+    backoff = max(0.0, _get_float_env("YF_OPTION_RETRY_BACKOFF_SECONDS", 1.0))
+    last_exc = None
+    for attempt in range(retries + 1):
+        _throttle_yfinance()
+        try:
+            chain = ticker_obj.option_chain(expiration)
+            if chain is not None:
+                return chain
+        except Exception as exc:  # pragma: no cover - exercised in integration
+            last_exc = exc
+            if _is_rate_limit_error(exc):
+                _apply_rate_limit_cooldown()
+        if attempt < retries:
+            sleep_seconds = backoff * (2**attempt)
+            if last_exc is not None and _is_rate_limit_error(last_exc):
+                cooldown = max(0.0, _get_float_env("YF_RATE_LIMIT_COOLDOWN_SECONDS", 5.0))
+                sleep_seconds = max(sleep_seconds, cooldown)
+            time.sleep(sleep_seconds)
+    if last_exc is not None:
+        raise last_exc
+    raise ValueError(f"Unable to fetch option chain for {expiration}.")
+
+
+def _options_with_retry(ticker_obj) -> list:
+    retries = max(0, _get_int_env("YF_OPTION_RETRIES", 2))
+    backoff = max(0.0, _get_float_env("YF_OPTION_RETRY_BACKOFF_SECONDS", 1.0))
+    last_exc = None
+    options = None
+    for attempt in range(retries + 1):
+        _throttle_yfinance()
+        try:
+            options = ticker_obj.options
+        except Exception as exc:  # pragma: no cover - exercised in integration
+            last_exc = exc
+            options = None
+            if _is_rate_limit_error(exc):
+                _apply_rate_limit_cooldown()
+        if options:
+            return list(options)
+        if attempt < retries:
+            sleep_seconds = backoff * (2**attempt)
+            if last_exc is not None and _is_rate_limit_error(last_exc):
+                cooldown = max(0.0, _get_float_env("YF_RATE_LIMIT_COOLDOWN_SECONDS", 5.0))
+                sleep_seconds = max(sleep_seconds, cooldown)
+            time.sleep(sleep_seconds)
+    if options is None and last_exc is not None:
+        raise last_exc
+    return list(options or [])
+
+
+def _history_with_throttle(ticker_obj, period: str):
+    _throttle_yfinance()
+    return ticker_obj.history(period=period)
 
 
 def fetch_stock_data(
@@ -154,10 +271,10 @@ def fetch_stock_option_data(
     latest_price = None
 
     if expiration:
-        chain = ticker_obj.option_chain(expiration)
+        chain = _option_chain_with_retry(ticker_obj, expiration)
         latest_price = _price_from_underlying(getattr(chain, "underlying", None))
         if latest_price is None:
-            stock_info = ticker_obj.history(period="1d")
+            stock_info = _history_with_throttle(ticker_obj, period="1d")
             if not stock_info.empty:
                 latest_price = float(stock_info["Close"].iloc[-1])
         calls_df = chain.calls
@@ -173,10 +290,10 @@ def fetch_stock_option_data(
         }
 
     if all_expirations:
-        expirations = ticker_obj.options
+        expirations = _options_with_retry(ticker_obj)
         all_data = {}
         for exp_date in expirations:
-            chain = ticker_obj.option_chain(exp_date)
+            chain = _option_chain_with_retry(ticker_obj, exp_date)
             if latest_price is None:
                 latest_price = _price_from_underlying(getattr(chain, "underlying", None))
             calls_df = chain.calls
@@ -188,20 +305,20 @@ def fetch_stock_option_data(
             else:
                 all_data[exp_date] = {"calls": calls_df, "puts": puts_df}
         if latest_price is None:
-            stock_info = ticker_obj.history(period="1d")
+            stock_info = _history_with_throttle(ticker_obj, period="1d")
             if not stock_info.empty:
                 latest_price = float(stock_info["Close"].iloc[-1])
         return {"ticker": ticker, "stock_price": latest_price, "option_data": all_data}
 
-    available_exps = ticker_obj.options
+    available_exps = _options_with_retry(ticker_obj)
     if not available_exps:
         raise ValueError(f"No option expiration dates found for {ticker}.")
 
     first_exp = available_exps[0]
-    chain = ticker_obj.option_chain(first_exp)
+    chain = _option_chain_with_retry(ticker_obj, first_exp)
     latest_price = _price_from_underlying(getattr(chain, "underlying", None))
     if latest_price is None:
-        stock_info = ticker_obj.history(period="1d")
+        stock_info = _history_with_throttle(ticker_obj, period="1d")
         if not stock_info.empty:
             latest_price = float(stock_info["Close"].iloc[-1])
     calls_df = chain.calls

@@ -9,8 +9,14 @@ def create_tickers_table():
                 CREATE TABLE IF NOT EXISTS tickers (
                     id SERIAL PRIMARY KEY,
                     symbol VARCHAR(10) NOT NULL UNIQUE,
-                    logo_url_base64 TEXT
+                    logo_url_base64 TEXT,
+                    price_movement_data JSONB,
+                    price_movement_updated_at TIMESTAMP
                 );
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tickers_price_movement_updated_at
+                ON tickers (price_movement_updated_at);
             """)
             conn.commit()
     finally:

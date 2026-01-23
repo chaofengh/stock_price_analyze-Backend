@@ -1,5 +1,4 @@
 # tests/test_tickers.py
-import pandas as pd
 from unittest.mock import patch, call
 from utils.auth import AuthResult
 
@@ -41,29 +40,54 @@ def test_delete_ticker_success(client):
 
 def test_get_tickers_success(client):
     """
-    Mock DB call to return tickers, then mock fetch_stock_data for returning sample data.
+    Mock DB call to return tickers, then mock cached price movement data.
     """
     fake_tickers = ["TSLA", "AAPL"]
     fake_data = {
-        "TSLA": pd.DataFrame([{"date": "2023-01-01", "close": 100.0}]),
-        "AAPL": pd.DataFrame([{"date": "2023-01-01", "close": 150.0}])
+        "TSLA": {"candles": [{"date": "2023-01-02", "close": 100.0}], "summary": {"previousClose": 98.0}},
+        "AAPL": {"candles": [{"date": "2023-01-02", "close": 150.0}], "summary": {"previousClose": 148.0}},
     }
     expected_output = {
-        "TSLA": [{"date": "2023-01-01", "close": 100.0}],
-        "AAPL": [{"date": "2023-01-01", "close": 150.0}]
+        "TSLA": {"candles": [{"date": "2023-01-02", "close": 100.0}], "summary": {"previousClose": 98.0}},
+        "AAPL": {"candles": [{"date": "2023-01-02", "close": 150.0}], "summary": {"previousClose": 148.0}},
     }
 
     with patch(
         "routes.tickers_routes.authenticate_bearer_token",
         return_value=AuthResult(user_id=123, payload={"user_id": 123}),
     ), patch("routes.tickers_routes.get_all_tickers", return_value=fake_tickers), patch(
-        "routes.tickers_routes.fetch_stock_data", return_value=fake_data
-    ) as mock_fetch:
+        "routes.tickers_routes.get_price_movement_data", return_value=fake_data
+    ) as mock_cache:
         response = client.get("/api/tickers", headers={"Authorization": "Bearer test"})
         assert response.status_code == 200
         data = response.get_json()
         assert data == expected_output
-        mock_fetch.assert_called_once_with(fake_tickers, period="1d", interval="5m")
+        mock_cache.assert_called_once_with(fake_tickers)
+
+def test_get_tickers_includes_all_user_tickers(client):
+    """
+    Ensure the response includes every ticker from the user's list,
+    even if data is missing for some tickers.
+    """
+    fake_tickers = ["TSLA", "AAPL", "MSFT"]
+    fake_data = {
+        "TSLA": {"candles": [{"date": "2023-01-02", "close": 100.0}], "summary": {"previousClose": 98.0}},
+        "AAPL": {"candles": [{"date": "2023-01-02", "close": 150.0}], "summary": {"previousClose": 148.0}},
+    }
+
+    with patch(
+        "routes.tickers_routes.authenticate_bearer_token",
+        return_value=AuthResult(user_id=123, payload={"user_id": 123}),
+    ), patch("routes.tickers_routes.get_all_tickers", return_value=fake_tickers), patch(
+        "routes.tickers_routes.get_price_movement_data", return_value=fake_data
+    ):
+        response = client.get("/api/tickers", headers={"Authorization": "Bearer test"})
+        assert response.status_code == 200
+        data = response.get_json()
+        assert len(data) == len(fake_tickers)
+        assert set(data.keys()) == set(fake_tickers)
+        assert data["MSFT"]["candles"] == []
+        assert data["MSFT"]["summary"]["previousClose"] is None
 
 def test_add_ticker_single(client):
     """
