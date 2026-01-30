@@ -99,5 +99,46 @@ if __name__ == "__main__":
     if should_start:
         create_scheduler(app)
 
-    # IMPORTANT: no warm scan on startup; the 4:02 PM job owns “official” runs
-    app.run(debug=False)
+    # IMPORTANT: no warm scan on startup; the 4:02 PM job owns "official" runs.
+    #
+    # On macOS, "localhost" often resolves to IPv6 (::1) while 127.0.0.1 is IPv4.
+    # The default Flask dev server binds to 127.0.0.1 only, which makes
+    # http://localhost:5000 fail. For local dev, we explicitly bind *both* loopbacks.
+    from werkzeug.serving import make_server
+    import threading
+
+    port = int(os.environ.get("PORT", "5000"))
+
+    servers = []
+    try:
+        servers.append(make_server("127.0.0.1", port, app, threaded=True))
+    except OSError as exc:
+        raise SystemExit(f"Failed to bind IPv4 127.0.0.1:{port}: {exc}")
+
+    try:
+        servers.append(make_server("::1", port, app, threaded=True))
+    except OSError as exc:
+        # If IPv6 binding fails (e.g., disabled), keep IPv4 so 127.0.0.1 still works.
+        print(f" ! Warning: failed to bind IPv6 ::1:{port} (localhost may not work): {exc}")
+    threads = []
+
+    def _serve(server):
+        server.serve_forever()
+
+    for srv in servers:
+        t = threading.Thread(target=_serve, args=(srv,), daemon=True)
+        threads.append(t)
+        t.start()
+
+    if len(servers) > 1:
+        print(f" * Running on http://127.0.0.1:{port} and http://localhost:{port} (IPv6 ::1)")
+    else:
+        print(f" * Running on http://127.0.0.1:{port} (IPv4 only)")
+
+    try:
+        # Block main thread; servers run in daemon threads.
+        for t in threads:
+            t.join()
+    except KeyboardInterrupt:
+        for srv in servers:
+            srv.shutdown()
