@@ -21,17 +21,29 @@ authors = [
 
 # Core runtime dependencies
 dependencies = [
-  "pandas>=1.0",
+  "APScheduler>=3.11.0",
+  "Flask>=3.1.0",
+  "Flask-Cors>=5.0.0",
+  "PyJWT>=2.10.1",
+  "alpha_vantage>=3.0.0",
+  "bcrypt>=4.3.0",
+  "finnhub-python>=2.4.22",
+  "joblib>=1.5.0",
   "numpy>=1.26,<2.0",   # stays on 1.x for ta-lib compatibility
+  "pandas>=2.2.3",
+  "pandas_market_calendars>=5.0.0",
+  "psycopg2-binary>=2.9.10",
+  "python-dotenv>=1.0.1",
+  "pytz>=2024.2",
+  "requests>=2.32.3",
   "ta-lib==0.6.4",
-  "requests>=2.25",
-  "sqlalchemy>=1.4"
+  "yfinance>=1.0",
 ]
 
 # Optional extras (e.g. `pip install .[test]`)
 [project.optional-dependencies]
 test = [
-  "pytest>=7.0",
+  "pytest>=8.3.0",
   "pytest-cov>=4.0"
 ]
 

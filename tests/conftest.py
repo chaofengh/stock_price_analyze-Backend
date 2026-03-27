@@ -21,7 +21,9 @@ load_dotenv()
 
 def _resolve_db_url():
     return (
-        os.getenv("external_database_url")
+        os.getenv("TEST_DATABASE_URL")
+        or os.getenv("external_database_url")
+        or os.getenv("DATABASE_URL")
     )
 
 
@@ -33,12 +35,14 @@ def _ensure_python_312():
 def db_url():
     """
     Provide the database URL for integration tests.
-    Prefer TEST_DATABASE_URL when set.
+    Precedence: TEST_DATABASE_URL > external_database_url > DATABASE_URL.
     """
     _ensure_python_312()
     db_url = _resolve_db_url()
     if not db_url:
-        pytest.skip("DATABASE_URL or TEST_DATABASE_URL must be set to run DB integration tests.")
+        pytest.skip(
+            "Set TEST_DATABASE_URL, external_database_url, or DATABASE_URL to run DB integration tests."
+        )
     os.environ["DATABASE_URL"] = db_url
     return db_url
 
