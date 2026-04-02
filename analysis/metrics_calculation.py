@@ -23,7 +23,26 @@ def average(items: list[dict], key: str) -> float | None:
 def compute_hug_length(hug_events: list[dict]) -> float | None:
     if not hug_events:
         return None
-    lengths = [(h["end_index"] - h["start_index"] + 1) for h in hug_events]
+    lengths: list[float] = []
+    for h in hug_events:
+        touch_count = h.get("touch_count")
+        if touch_count is not None:
+            try:
+                lengths.append(float(touch_count))
+                continue
+            except (TypeError, ValueError):
+                pass
+
+        start_session = h.get("start_session_index")
+        end_session = h.get("end_session_index")
+        if start_session is not None and end_session is not None:
+            try:
+                lengths.append(float(end_session) - float(start_session) + 1.0)
+                continue
+            except (TypeError, ValueError):
+                pass
+
+        lengths.append(float(h["end_index"] - h["start_index"] + 1))
     return _mean(lengths)
 
 def compute_aggregates(results, hug_events_upper, hug_events_lower) -> dict:

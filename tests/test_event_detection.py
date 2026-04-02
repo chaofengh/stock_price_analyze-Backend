@@ -1,5 +1,6 @@
 # tests/test_event_detection.py
 
+import numpy as np
 import pandas as pd
 from analysis.event_detection import process_bollinger_touches, detect_hug_events, find_short_term_high, find_short_term_low
 
@@ -54,6 +55,69 @@ def test_detect_hug_events():
 
     # no lower‐band hugs
     assert lows == []
+
+
+def test_process_bollinger_touches_assigns_session_index_for_valid_rows_only():
+    df = pd.DataFrame({
+        "date": pd.to_datetime(["2024-07-03", "2024-07-05", "2024-07-08"]),
+        "high": [11.0, np.nan, 12.0],
+        "low": [6.0, np.nan, 6.0],
+        "close": [10.0, np.nan, 11.0],
+        "BB_upper": [10.0, np.nan, 10.0],
+        "BB_lower": [5.0, np.nan, 5.0],
+    })
+
+    touches = process_bollinger_touches(df, mode="historical")
+    upper_touches = [touch for touch in touches if touch["band"] == "upper"]
+
+    assert [touch["index"] for touch in upper_touches] == [0, 2]
+    assert [touch["session_index"] for touch in upper_touches] == [0, 1]
+
+
+def test_detect_hug_events_holiday_gap_is_single_consecutive_streak():
+    df = pd.DataFrame({
+        "date": pd.to_datetime(["2024-07-04", "2024-07-05", "2024-07-08"]),
+        "high": [11.0, np.nan, 12.0],
+        "low": [6.0, np.nan, 6.0],
+        "close": [10.0, np.nan, 11.0],
+        "BB_upper": [10.0, np.nan, 10.0],
+        "BB_lower": [5.0, np.nan, 5.0],
+    })
+
+    touches = process_bollinger_touches(df, mode="historical")
+    upper_events, _ = detect_hug_events(df, touches, min_group_len=2)
+
+    assert len(upper_events) == 1
+    event = upper_events[0]
+    assert event["start_index"] == 0
+    assert event["end_index"] == 2
+    assert event["start_session_index"] == 0
+    assert event["end_session_index"] == 1
+    assert event["touch_count"] == 2
+
+
+def test_detect_hug_events_multi_day_market_closure_is_single_streak():
+    # Thanksgiving-style closure gap between touches:
+    # Wednesday touch, then two non-trading/invalid rows, then Monday touch.
+    df = pd.DataFrame({
+        "date": pd.to_datetime(["2024-11-27", "2024-11-28", "2024-11-29", "2024-12-02"]),
+        "high": [11.0, np.nan, np.nan, 12.0],
+        "low": [6.0, np.nan, np.nan, 6.0],
+        "close": [10.0, np.nan, np.nan, 11.0],
+        "BB_upper": [10.0, np.nan, np.nan, 10.0],
+        "BB_lower": [5.0, np.nan, np.nan, 5.0],
+    })
+
+    touches = process_bollinger_touches(df, mode="historical")
+    upper_events, _ = detect_hug_events(df, touches, min_group_len=2)
+
+    assert len(upper_events) == 1
+    event = upper_events[0]
+    assert event["start_index"] == 0
+    assert event["end_index"] == 3
+    assert event["start_session_index"] == 0
+    assert event["end_session_index"] == 1
+    assert event["touch_count"] == 2
 
 def test_find_short_term_high():
     df = pd.DataFrame({'close': [10, 12, 11, 13, 8, 15]})

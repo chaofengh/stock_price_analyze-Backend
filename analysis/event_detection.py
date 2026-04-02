@@ -28,6 +28,17 @@ def _has_required_fields(row: pd.Series, fields: list[str]) -> bool:
     return all((row.get(field) is not None) and (row.get(field) == row.get(field)) for field in fields)
 
 
+def _touch_sequence_value(touch: dict) -> int:
+    """Return touch sequence id, preferring trading-session sequence over raw row index."""
+    session_index = touch.get("session_index")
+    if session_index is not None and session_index == session_index:
+        try:
+            return int(session_index)
+        except (TypeError, ValueError):
+            pass
+    return int(touch["index"])
+
+
 def process_bollinger_touches(data, mode: str = "alert") -> list[dict]:
     """
     Process Bollinger Band touches in two modes.
@@ -69,14 +80,17 @@ def process_bollinger_touches(data, mode: str = "alert") -> list[dict]:
 
     if mode == "historical":
         required = ["date", "close", "BB_upper", "BB_lower", "high", "low"]
+        session_index = -1
         for i in range(len(data)):
             row = data.iloc[i]
             if not _has_required_fields(row, required):
                 continue
+            session_index += 1
             if row["high"] >= row["BB_upper"]:
                 results.append({
                     "date": row["date"],
                     "index": i,
+                    "session_index": session_index,
                     "band": "upper",
                     "price": float(row["close"]),
                 })
@@ -84,6 +98,7 @@ def process_bollinger_touches(data, mode: str = "alert") -> list[dict]:
                 results.append({
                     "date": row["date"],
                     "index": i,
+                    "session_index": session_index,
                     "band": "lower",
                     "price": float(row["close"]),
                 })
@@ -134,22 +149,27 @@ def detect_hug_events(
 
         def flush():
             if len(group) >= min_group_len:
+                start_touch = group[0]
+                end_touch = group[-1]
                 events.append(
                     {
                         "band": band,
-                        "start_index": group[0]["index"],
-                        "end_index": group[-1]["index"],
-                        "start_date": data.loc[group[0]["index"], "date"],
-                        "end_date": data.loc[group[-1]["index"], "date"],
-                        "start_price": float(group[0]["price"]),
-                        "end_price": float(group[-1]["price"]),
+                        "start_index": start_touch["index"],
+                        "end_index": end_touch["index"],
+                        "start_session_index": _touch_sequence_value(start_touch),
+                        "end_session_index": _touch_sequence_value(end_touch),
+                        "touch_count": len(group),
+                        "start_date": data.loc[start_touch["index"], "date"],
+                        "end_date": data.loc[end_touch["index"], "date"],
+                        "start_price": float(start_touch["price"]),
+                        "end_price": float(end_touch["price"]),
                     }
                 )
 
         for t in band_touches:
             if not group:
                 group.append(t)
-            elif t["index"] == group[-1]["index"] + 1:
+            elif _touch_sequence_value(t) == _touch_sequence_value(group[-1]) + 1:
                 group.append(t)
             else:
                 flush()
