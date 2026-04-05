@@ -20,7 +20,7 @@ from routes.ticker_logo_routes import ticker_logo_blueprint
 from routes.world_markets_routes import world_markets_blueprint
 
 # Scheduled job wrapper
-from tasks.daily_scan_tasks import daily_scan_wrapper
+from tasks.daily_scan_tasks import daily_scan_wrapper, prime_scan_cache
 from tasks.watchlist_cache_tasks import refresh_watchlist_cache
 
 def create_app(testing=False):
@@ -51,7 +51,7 @@ def create_app(testing=False):
 def create_scheduler(app: Flask):
     """
     Background scheduler pinned to America/Chicago.
-    Job runs Mon–Fri at 16:02 local Chicago time.
+    Scan job runs hourly during regular NYSE session on weekdays.
     """
     chicago = timezone("America/Chicago")
     scheduler = BackgroundScheduler(
@@ -68,8 +68,8 @@ def create_scheduler(app: Flask):
         trigger="cron",
         id="daily_scan",
         day_of_week="mon-fri",
-        hour=16,
-        minute=2,
+        hour="8-14",                 # 9:30-16:00 ET session in CT
+        minute=35,                   # fixed offset each hour
         replace_existing=True,          # if it somehow exists, replace it
     )
     scheduler.add_job(
@@ -86,6 +86,11 @@ def create_scheduler(app: Flask):
         else:
             app.logger.info("Job %s executed OK", event.job_id)
 
+    try:
+        prime_scan_cache()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        app.logger.error("Startup scan prime failed: %s", exc)
+
     scheduler.add_listener(_log, events.EVENT_JOB_EXECUTED | events.EVENT_JOB_ERROR)
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown(wait=False))
@@ -99,7 +104,7 @@ if __name__ == "__main__":
     if should_start:
         create_scheduler(app)
 
-    # IMPORTANT: no warm scan on startup; the 4:02 PM job owns "official" runs.
+    # Scan cache is primed once in create_scheduler(); hourly cron jobs own official refreshes.
     #
     # On macOS, "localhost" often resolves to IPv6 (::1) while 127.0.0.1 is IPv4.
     # The default Flask dev server binds to 127.0.0.1 only, which makes
