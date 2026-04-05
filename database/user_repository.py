@@ -136,6 +136,53 @@ def find_user_by_email_or_username(email_or_username: str):
     finally:
         conn.close()
 
+
+def find_user_for_login(email_or_username: str):
+    """
+    Retrieve a login row by email or username.
+    Returns a tuple:
+    (
+      id,
+      email,
+      username,
+      password_hash,
+      created_at,
+      first_name,
+      last_name,
+      phone,
+      country,
+      timezone,
+      marketing_opt_in
+    )
+    or None if no matching user is found.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    email,
+                    username,
+                    password_hash,
+                    created_at,
+                    first_name,
+                    last_name,
+                    phone,
+                    country,
+                    timezone,
+                    marketing_opt_in
+                FROM users
+                WHERE email = %s OR username = %s
+                LIMIT 1;
+                """,
+                (email_or_username, email_or_username),
+            )
+            return cur.fetchone()
+    finally:
+        conn.close()
+
 def find_user_by_email(email: str):
     """
     Retrieve a user row by email.

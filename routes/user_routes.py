@@ -10,9 +10,8 @@ from email.mime.multipart import MIMEMultipart
 
 from database.user_repository import (
     create_user,
-    find_user_by_email_or_username,
+    find_user_for_login,
     find_user_by_email,
-    get_user_public_profile,
     verify_password,
     set_reset_token
 )
@@ -32,6 +31,45 @@ MAIL_USE_TLS = os.getenv("MAIL_USE_TLS", "False").lower() == "true"
 JWT_SECRET = os.getenv("JWT_SECRET", "your_jwt_secret")
 JWT_ALGORITHM = "HS256"
 JWT_ACCESS_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_DAYS", "30"))
+
+
+def _create_access_token(user_id: int) -> str:
+    payload = {
+        "user_id": user_id,
+        "iat": datetime.now(timezone.utc),
+        "exp": datetime.now(timezone.utc) + timedelta(days=JWT_ACCESS_TOKEN_EXPIRE_DAYS),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _build_user_payload(
+    *,
+    user_id: int,
+    email: str,
+    username: str,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    phone: str | None = None,
+    country: str | None = None,
+    timezone_name: str | None = None,
+    marketing_opt_in: bool | None = None,
+    created_at=None,
+    include_created_at: bool = False,
+) -> dict:
+    payload = {
+        "id": user_id,
+        "email": email,
+        "username": username,
+        "first_name": first_name,
+        "last_name": last_name,
+        "phone": phone,
+        "country": country,
+        "timezone": timezone_name,
+        "marketing_opt_in": marketing_opt_in,
+    }
+    if include_created_at:
+        payload["created_at"] = created_at.isoformat() if created_at else None
+    return payload
 
 def sanitize_username(username: str) -> str:
     """
@@ -143,27 +181,24 @@ def register():
         else:
             create_empty_default_user_list(user_id)
 
-        payload = {
-            "user_id": user_id,
-            "iat": datetime.now(timezone.utc),
-            "exp": datetime.now(timezone.utc) + timedelta(days=JWT_ACCESS_TOKEN_EXPIRE_DAYS),
-        }
-        token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+        token = _create_access_token(user_id)
+        user_payload = _build_user_payload(
+            user_id=user_id,
+            email=user_email,
+            username=user_name,
+            first_name=created_first_name,
+            last_name=created_last_name,
+            phone=created_phone,
+            country=created_country,
+            timezone_name=created_timezone,
+            marketing_opt_in=created_marketing_opt_in,
+            created_at=created_at,
+            include_created_at=True,
+        )
 
         return jsonify({
             "message": "User registered successfully",
-            "user": {
-                "id": user_id,
-                "email": user_email,
-                "username": user_name,
-                "first_name": created_first_name,
-                "last_name": created_last_name,
-                "phone": created_phone,
-                "country": created_country,
-                "timezone": created_timezone,
-                "marketing_opt_in": created_marketing_opt_in,
-                "created_at": created_at.isoformat() if created_at else None
-            },
+            "user": user_payload,
             "token": token,
         }), 201
     except Exception as e:
@@ -205,59 +240,46 @@ def login():
         except Exception:
             pass
 
-    user_row = find_user_by_email_or_username(email_or_username)
+    user_row = find_user_for_login(email_or_username)
     if not user_row:
         return jsonify({"error": "Invalid credentials"}), 401
 
-    user_id, user_email, user_name, password_hash, _, _ = user_row
+    (
+        user_id,
+        user_email,
+        user_name,
+        password_hash,
+        _created_at,
+        first_name,
+        last_name,
+        phone,
+        country,
+        user_timezone,
+        marketing_opt_in,
+    ) = user_row
 
     if not verify_password(password, password_hash):
         return jsonify({"error": "Invalid credentials"}), 401
 
+    # Keep test-user compatibility while removing expensive repeated reseeding on login.
     if user_email.lower() == "test@gmail.com":
         try:
-            create_default_user_list(user_id)
+            create_empty_default_user_list(user_id)
         except Exception:
             pass
 
-    payload = {
-        "user_id": user_id,
-        "iat": datetime.now(timezone.utc),
-        "exp": datetime.now(timezone.utc) + timedelta(days=JWT_ACCESS_TOKEN_EXPIRE_DAYS),
-    }
-    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
-    profile = get_user_public_profile(user_id)
-    if profile:
-        (
-            _id,
-            _email,
-            _username,
-            _created_at,
-            _first_name,
-            _last_name,
-            _phone,
-            _country,
-            _timezone,
-            _marketing_opt_in,
-        ) = profile
-        user_payload = {
-            "id": _id,
-            "email": _email,
-            "username": _username,
-            "first_name": _first_name,
-            "last_name": _last_name,
-            "phone": _phone,
-            "country": _country,
-            "timezone": _timezone,
-            "marketing_opt_in": _marketing_opt_in,
-        }
-    else:
-        user_payload = {
-            "id": user_id,
-            "email": user_email,
-            "username": user_name,
-        }
+    token = _create_access_token(user_id)
+    user_payload = _build_user_payload(
+        user_id=user_id,
+        email=user_email,
+        username=user_name,
+        first_name=first_name,
+        last_name=last_name,
+        phone=phone,
+        country=country,
+        timezone_name=user_timezone,
+        marketing_opt_in=marketing_opt_in,
+    )
 
     return jsonify({
         "message": "Login successful",
