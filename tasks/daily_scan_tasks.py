@@ -19,7 +19,7 @@ scan_updated_evt = threading.Event()   # signals SSE when a new scan is ready
 # Scheduling policy (keep in sync with app.py cron)
 _CHICAGO_TZ = pytz.timezone("America/Chicago")
 _NYSE = mcal.get_calendar("NYSE")
-_RUN_MINUTE = 35               # xx:35 CT every trading-hour slot
+_RUN_MINUTES = (5, 35)         # xx:05 and xx:35 CT every trading half-hour slot
 _MAX_LOOKAHEAD_DAYS = 14
 
 _cache_lock = threading.Lock()
@@ -60,21 +60,41 @@ def _is_within_regular_session(now: datetime) -> bool:
     return open_dt <= now < close_dt
 
 
+def _slot_time_for(now: datetime) -> datetime:
+    minute = now.minute
+    if minute >= _RUN_MINUTES[1]:
+        slot_minute = _RUN_MINUTES[1]
+        slot_time = now.replace(minute=slot_minute, second=0, microsecond=0)
+    elif minute >= _RUN_MINUTES[0]:
+        slot_minute = _RUN_MINUTES[0]
+        slot_time = now.replace(minute=slot_minute, second=0, microsecond=0)
+    else:
+        slot_time = (now - timedelta(hours=1)).replace(
+            minute=_RUN_MINUTES[1],
+            second=0,
+            microsecond=0,
+        )
+    return slot_time
+
+
 def _slot_key(now: datetime) -> str:
-    return now.strftime("%Y-%m-%d %H")
+    return _slot_time_for(now).strftime("%Y-%m-%d %H:%M")
 
 
-def _next_hourly_slot_at_or_after(point: datetime) -> datetime:
-    candidate = point.replace(minute=_RUN_MINUTE, second=0, microsecond=0)
-    if candidate <= point:
-        candidate += timedelta(hours=1)
-    return candidate
+def _next_slot_at_or_after(point: datetime) -> datetime:
+    base = point.replace(second=0, microsecond=0)
+    for minute in _RUN_MINUTES:
+        candidate = base.replace(minute=minute)
+        if candidate > point:
+            return candidate
+
+    return (base + timedelta(hours=1)).replace(minute=_RUN_MINUTES[0])
 
 
 def _next_run_time_chi(now: datetime | None = None) -> datetime:
     """
-    Next NYSE-trading hourly slot in Chicago time.
-    Slots are xx:35, during regular market session only.
+    Next NYSE-trading half-hour slot in Chicago time.
+    Slots are xx:05 and xx:35 during regular market session only.
     """
     now = now or _now_chi()
 
@@ -86,13 +106,13 @@ def _next_run_time_chi(now: datetime | None = None) -> datetime:
 
         open_dt, close_dt = bounds
         start = max(now, open_dt) if day_offset == 0 else open_dt
-        candidate = _next_hourly_slot_at_or_after(start)
+        candidate = _next_slot_at_or_after(start)
 
         if candidate < close_dt:
             return candidate
 
     # Fallback to keep metadata stable even if calendar lookup fails unexpectedly.
-    fallback = _next_hourly_slot_at_or_after(now)
+    fallback = _next_slot_at_or_after(now)
     return fallback
 
 
@@ -195,9 +215,9 @@ def prime_scan_cache() -> dict:
 
 def daily_scan_wrapper():
     """
-    Hourly scheduler wrapper:
+    Half-hour scheduler wrapper:
     - skip when market session is closed
-    - run at most once per hour slot
+    - run at most once per half-hour slot
     - signal SSE listeners after successful refresh
     """
     now = _now_chi()
@@ -213,7 +233,7 @@ def daily_scan_wrapper():
     if _get_last_successful_slot_key() == current_slot:
         return {
             "status": "skipped",
-            "reason": "already_scanned_this_hour",
+            "reason": "already_scanned_this_slot",
             "slot": current_slot,
             "next_run_at": _next_run_time_chi(now).strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -221,7 +241,7 @@ def daily_scan_wrapper():
     try:
         result = _run_scan_and_cache(now=now, is_official=True, slot_key=current_slot)
     except Exception:
-        logger.exception("Hourly scan failed for slot %s.", current_slot)
+        logger.exception("Half-hour scan failed for slot %s.", current_slot)
         return {
             "status": "error",
             "reason": "scan_failed",

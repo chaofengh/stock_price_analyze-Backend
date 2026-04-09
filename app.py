@@ -51,7 +51,7 @@ def create_app(testing=False):
 def create_scheduler(app: Flask):
     """
     Background scheduler pinned to America/Chicago.
-    Scan job runs hourly during regular NYSE session on weekdays.
+    Scan job runs every 30 minutes during regular NYSE session on weekdays.
     """
     chicago = timezone("America/Chicago")
     scheduler = BackgroundScheduler(
@@ -69,7 +69,7 @@ def create_scheduler(app: Flask):
         id="daily_scan",
         day_of_week="mon-fri",
         hour="8-14",                 # 9:30-16:00 ET session in CT
-        minute=35,                   # fixed offset each hour
+        minute="5,35",               # two slots per hour
         replace_existing=True,          # if it somehow exists, replace it
     )
     scheduler.add_job(
@@ -104,7 +104,7 @@ if __name__ == "__main__":
     if should_start:
         create_scheduler(app)
 
-    # Scan cache is primed once in create_scheduler(); hourly cron jobs own official refreshes.
+    # Scan cache is primed once in create_scheduler(); cron jobs own official refreshes.
     #
     # On macOS, "localhost" often resolves to IPv6 (::1) while 127.0.0.1 is IPv4.
     # The default Flask dev server binds to 127.0.0.1 only, which makes

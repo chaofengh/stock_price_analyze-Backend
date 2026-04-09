@@ -28,7 +28,7 @@ def test_app_creation(app):
     assert app.testing is True
 
 
-def test_create_scheduler_registers_hourly_scan_and_watchlist_jobs():
+def test_create_scheduler_registers_half_hour_scan_and_watchlist_jobs():
     flask_app = create_app(testing=True)
     fake_scheduler = _FakeScheduler()
 
@@ -54,7 +54,7 @@ def test_create_scheduler_registers_hourly_scan_and_watchlist_jobs():
     assert daily_job["trigger"] == "cron"
     assert daily_job["day_of_week"] == "mon-fri"
     assert daily_job["hour"] == "8-14"
-    assert daily_job["minute"] == 35
+    assert daily_job["minute"] == "5,35"
     assert daily_job["replace_existing"] is True
 
     watchlist_job = next(job for job in fake_scheduler.jobs if job["id"] == "watchlist_cache")
