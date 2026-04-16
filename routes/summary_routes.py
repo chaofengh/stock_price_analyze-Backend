@@ -7,6 +7,7 @@ from analysis.summary import (
     get_summary_peers,
     get_summary_fundamentals,
     get_summary_peer_averages,
+    get_entry_decision,
 )
 from utils.serialization import convert_to_python_types
 
@@ -104,5 +105,23 @@ def summary_bundle_endpoint():
     try:
         payload = convert_to_python_types(get_summary_bundle(symbol))
         return jsonify(payload), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@summary_blueprint.route("/api/summary/entry-decision", methods=["GET"])
+def summary_entry_decision_endpoint():
+    """
+    Two-stage Bollinger decision object + 1Y prediction-accuracy backtest.
+    Example usage:
+      GET /api/summary/entry-decision?symbol=QQQ&as_of_date=2026-04-15
+    """
+    symbol = _get_symbol()
+    as_of_date = request.args.get("as_of_date", default=None, type=str)
+    try:
+        payload = convert_to_python_types(get_entry_decision(symbol, as_of_date=as_of_date))
+        return jsonify(payload), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500

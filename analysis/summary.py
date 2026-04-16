@@ -10,6 +10,7 @@ from .summary_peers import (
     get_summary_fundamentals,
     get_summary_peer_averages,
 )
+from .trade_entry_evaluation import get_entry_decision
 
 __all__ = [
     "get_summary",
@@ -18,4 +19,5 @@ __all__ = [
     "get_summary_peers",
     "get_summary_fundamentals",
     "get_summary_peer_averages",
+    "get_entry_decision",
 ]
