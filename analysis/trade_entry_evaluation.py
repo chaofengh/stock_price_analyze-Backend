@@ -5,6 +5,7 @@ and a matching 1-year next-day prediction-accuracy evaluator.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from functools import lru_cache
 import math
 import re
@@ -21,6 +22,7 @@ from .data_fetcher_utils import normalize_symbol, symbol_candidates
 _EPS = 1e-9
 _STAGE_A_THRESHOLD = 0.55
 _STAGE_B_THRESHOLD = 0.58
+_ENTRY_CONTEXT_CACHE_SIZE = 128
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -458,6 +460,16 @@ def _classify_setup(touched_side: str | None, enter_today: bool) -> str:
     if enter_today and touched_side == "Lower":
         return "lower_band_mean_reversion"
     return "trend_continuation_trap"
+
+
+def _build_decisions_by_index(feature_df: pd.DataFrame) -> dict[int, dict]:
+    decisions: dict[int, dict] = {}
+    for idx in range(len(feature_df)):
+        row = feature_df.iloc[idx]
+        if row.get("touched_side") not in ("Upper", "Lower"):
+            continue
+        decisions[idx] = evaluate_row_decision(row)
+    return decisions
 
 
 def evaluate_row_decision(
@@ -899,10 +911,9 @@ def build_entry_decision_from_frame(
     )
     parsed_as_of_date = _parse_as_of_date(as_of_date)
     resolved_idx, date_was_snapped = _resolve_as_of_index(feature_df, parsed_as_of_date)
-    decision_cache: dict[int, dict] = {}
+    decisions_by_index = _build_decisions_by_index(feature_df)
     selected_row = feature_df.iloc[resolved_idx]
-    selected_decision = evaluate_row_decision(selected_row)
-    decision_cache[resolved_idx] = selected_decision
+    selected_decision = decisions_by_index.get(resolved_idx) or evaluate_row_decision(selected_row)
 
     payload = {
         "symbol": normalized,
@@ -920,7 +931,7 @@ def build_entry_decision_from_frame(
         "stage_a": selected_decision["stage_a"],
         "stage_b": selected_decision["stage_b"],
         "top_reasons": selected_decision["top_reasons"],
-        "backtest_1y": run_decision_backtest(feature_df, decisions_by_index=decision_cache),
+        "backtest_1y": run_decision_backtest(feature_df, decisions_by_index=decisions_by_index),
     }
 
     return payload
@@ -943,21 +954,68 @@ def _load_entry_frame(symbol: str) -> tuple[str, pd.DataFrame]:
     return "", pd.DataFrame()
 
 
+@lru_cache(maxsize=_ENTRY_CONTEXT_CACHE_SIZE)
+def _get_entry_context_cached(symbol: str) -> tuple[str, pd.DataFrame, dict[int, dict], dict]:
+    resolved_symbol, frame = _load_entry_frame(symbol)
+    if frame.empty:
+        raise ValueError(f"No data found for symbol {symbol}")
+
+    feature_df = _prepare_feature_frame(
+        frame,
+        symbol=normalize_symbol(resolved_symbol or symbol),
+        earnings_dates=None,
+    )
+    decisions_by_index = _build_decisions_by_index(feature_df)
+    backtest_1y = run_decision_backtest(feature_df, decisions_by_index=decisions_by_index)
+    return resolved_symbol or symbol, feature_df, decisions_by_index, backtest_1y
+
+
+def _build_payload_from_cached_context(
+    symbol: str,
+    *,
+    as_of_date: str | None,
+    feature_df: pd.DataFrame,
+    decisions_by_index: dict[int, dict],
+    backtest_1y: dict,
+) -> dict:
+    parsed_as_of_date = _parse_as_of_date(as_of_date)
+    resolved_idx, date_was_snapped = _resolve_as_of_index(feature_df, parsed_as_of_date)
+    selected_row = feature_df.iloc[resolved_idx]
+    selected_decision = deepcopy(decisions_by_index.get(resolved_idx) or evaluate_row_decision(selected_row))
+
+    return {
+        "symbol": symbol,
+        "requested_as_of_date": _to_date_string(parsed_as_of_date),
+        "as_of_date": _to_date_string(selected_row.get("date")),
+        "date_was_snapped": bool(parsed_as_of_date is not None and date_was_snapped),
+        "touched_side": selected_decision["touched_side"],
+        "setup_type": selected_decision["setup_type"],
+        "enter_today": selected_decision["enter_today"],
+        "reversion_probability": selected_decision["reversion_probability"],
+        "continuation_probability": selected_decision["continuation_probability"],
+        "expected_return_to_target_atr": selected_decision["expected_return_to_target_atr"],
+        "expected_adverse_move_atr": selected_decision["expected_adverse_move_atr"],
+        "confidence_score": selected_decision["confidence_score"],
+        "stage_a": selected_decision["stage_a"],
+        "stage_b": selected_decision["stage_b"],
+        "top_reasons": selected_decision["top_reasons"],
+        "backtest_1y": deepcopy(backtest_1y),
+    }
+
+
 def get_entry_decision(symbol: str, as_of_date: str | None = None) -> dict:
     normalized = normalize_symbol(symbol)
     if not normalized:
         raise ValueError("Missing symbol for entry decision")
 
-    resolved_symbol, frame = _load_entry_frame(normalized)
-    if frame.empty:
-        raise ValueError(f"No data found for symbol {normalized}")
+    _, feature_df, decisions_by_index, backtest_1y = _get_entry_context_cached(normalized)
 
-    return build_entry_decision_from_frame(
+    return _build_payload_from_cached_context(
         normalized,
-        frame,
         as_of_date=as_of_date,
-        earnings_dates=None,
-        earnings_symbol=resolved_symbol or normalized,
+        feature_df=feature_df,
+        decisions_by_index=decisions_by_index,
+        backtest_1y=backtest_1y,
     )
 
 
