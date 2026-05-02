@@ -68,14 +68,30 @@ def test_summary_entry_decision_returns_payload(mock_entry_decision, client):
         "requested_as_of_date": "2026-04-15",
         "as_of_date": "2026-04-15",
         "date_was_snapped": False,
-        "setup_type": "trend_continuation_trap",
-        "enter_today": False,
-        "reversion_probability": 0.42,
-        "continuation_probability": 0.58,
-        "stage_a": {"is_favorable": False, "probability": 0.49, "event_risk_blocked": False},
-        "stage_b": {"entry_probability": 0.42, "threshold": 0.58},
+        "setup_type": "upper_band_touch",
+        "touched_side": "Upper",
+        "prediction_threshold": 0.75,
+        "horizons": {
+            "5d": {
+                "status": "prediction",
+                "predicted_direction": "continuation",
+                "continuation_probability": 0.64,
+                "reversal_probability": 0.36,
+                "confidence_score": 64,
+                "no_prediction_reason": None,
+            },
+            "10d": {
+                "status": "no_prediction",
+                "predicted_direction": None,
+                "continuation_probability": 0.52,
+                "reversal_probability": 0.48,
+                "confidence_score": 52,
+                "no_prediction_reason": "low_confidence",
+            },
+        },
         "top_reasons": [],
-        "backtest_1y": {"sample_count": 12, "accuracy": 0.5},
+        "backtest_1y": {"5d": {"prediction_count": 12, "accuracy": 0.5}},
+        "chart_data": [],
     }
 
     response = client.get('/api/summary/entry-decision?symbol=FAKE&as_of_date=2026-04-15')
@@ -83,9 +99,10 @@ def test_summary_entry_decision_returns_payload(mock_entry_decision, client):
 
     data = response.get_json()
     assert data["symbol"] == "FAKE"
-    assert data["setup_type"] == "trend_continuation_trap"
-    assert data["stage_a"]["probability"] == 0.49
-    assert data["backtest_1y"]["sample_count"] == 12
+    assert data["setup_type"] == "upper_band_touch"
+    assert data["horizons"]["5d"]["predicted_direction"] == "continuation"
+    assert data["horizons"]["10d"]["no_prediction_reason"] == "low_confidence"
+    assert data["backtest_1y"]["5d"]["prediction_count"] == 12
     mock_entry_decision.assert_called_once_with("FAKE", as_of_date="2026-04-15")
 
 

@@ -4,13 +4,20 @@ import pytest
 
 from analysis.indicators import compute_bollinger_bands
 from analysis.trade_entry_evaluation import (
-    _classify_setup,
+    _MODEL_FEATURES,
+    _apply_deployment_quality_gates_to_decision,
+    _build_training_matrix,
+    _deployment_quality_gate,
+    _finalize_deployment_quality,
+    _prepare_feature_frame,
+    _reversal_veto_reason,
     build_entry_decision_from_frame,
+    evaluate_row_decision,
     run_decision_backtest,
 )
 
 
-def _base_frame(rows: int = 80) -> pd.DataFrame:
+def _base_frame(rows: int = 100) -> pd.DataFrame:
     dates = pd.bdate_range("2025-01-02", periods=rows)
     x = np.linspace(0, 6 * np.pi, rows)
     close = 100 + np.sin(x) * 2 + np.linspace(0, 3.5, rows)
@@ -43,9 +50,9 @@ def _force_lower_touch(frame: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _force_no_touch(frame: pd.DataFrame) -> pd.DataFrame:
+def _force_no_touch(frame: pd.DataFrame, idx: int | None = None) -> pd.DataFrame:
     df = frame.copy()
-    idx = df.index[-1]
+    idx = df.index[-1] if idx is None else idx
     upper = float(df.loc[idx, "BB_upper"])
     lower = float(df.loc[idx, "BB_lower"])
     mid = float(df.loc[idx, "BB_middle"])
@@ -56,95 +63,592 @@ def _force_no_touch(frame: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def test_stage_a_earnings_block_disables_favorable_regime():
-    df = _force_lower_touch(_base_frame())
-    earnings_dates = {pd.Timestamp(df["date"].iloc[-1]).normalize()}
+def _manual_horizon(status, predicted_direction=None, confidence=0.7, tier=None, signal_id=None):
+    if status != "prediction":
+        return {
+            "status": "no_prediction",
+            "predicted_direction": None,
+            "continuation_probability": 0.52,
+            "reversal_probability": 0.48,
+            "confidence_score": 52,
+            "no_prediction_reason": "low_confidence",
+        }
+    continuation_probability = confidence if predicted_direction == "continuation" else 1 - confidence
+    horizon = {
+        "status": "prediction",
+        "predicted_direction": predicted_direction,
+        "continuation_probability": continuation_probability,
+        "reversal_probability": 1 - continuation_probability,
+        "confidence_score": int(confidence * 100),
+        "no_prediction_reason": None,
+    }
+    if tier:
+        horizon["playbook"] = {"tier": tier, "id": signal_id or tier}
+    elif signal_id:
+        horizon["playbook"] = {"id": signal_id}
+    return horizon
 
-    payload = build_entry_decision_from_frame("TEST", df, earnings_dates=earnings_dates)
 
-    assert payload["stage_a"]["event_risk_blocked"] is True
-    assert payload["stage_a"]["is_favorable"] is False
+def _manual_decision(h5, h10):
+    return {
+        "horizons": {
+            "5d": h5,
+            "10d": h10,
+        }
+    }
+
+
+def test_latest_no_touch_still_runs_model_for_today_exception():
+    df = _force_no_touch(_base_frame())
+    payload = build_entry_decision_from_frame("TEST", df, earnings_dates=set())
+
+    assert payload["touched_side"] is None
+    assert payload["setup_type"] == "no_band_setup"
+    assert payload["horizons"]["5d"]["no_prediction_reason"] != "no_bollinger_touch"
+    assert payload["horizons"]["10d"]["no_prediction_reason"] != "no_bollinger_touch"
+
+
+def test_historical_no_touch_returns_no_prediction_for_both_horizons():
+    target_idx = 80
+    df = _force_no_touch(_base_frame(110), idx=target_idx)
+    target_date = pd.Timestamp(df["date"].iloc[target_idx]).strftime("%Y-%m-%d")
+    payload = build_entry_decision_from_frame("TEST", df, as_of_date=target_date, earnings_dates=set())
+
+    assert payload["touched_side"] is None
+    assert payload["setup_type"] == "no_band_setup"
+    assert payload["horizons"]["5d"]["status"] == "no_prediction"
+    assert payload["horizons"]["5d"]["no_prediction_reason"] == "no_bollinger_touch"
+    assert payload["horizons"]["10d"]["status"] == "no_prediction"
+    assert payload["horizons"]["10d"]["no_prediction_reason"] == "no_bollinger_touch"
+
+
+def _empty_supervised_frame(rows: int) -> pd.DataFrame:
+    data = {
+        "date": pd.bdate_range("2025-01-02", periods=rows),
+        "close": np.full(rows, 100.0),
+        "touched_side": [None] * rows,
+        "event_risk_blocked": [False] * rows,
+    }
+    for feature in _MODEL_FEATURES:
+        data[feature] = np.zeros(rows)
+    return pd.DataFrame(data)
+
+
+def _set_training_signal(df: pd.DataFrame, idx: int, *, continuation: bool, feature_value: float) -> None:
+    df.loc[idx, "touched_side"] = "Upper"
+    df.loc[idx, "touch_side_sign"] = 1.0
+    df.loc[idx, "side_close_location"] = feature_value
+    df.loc[idx, "touch_wick_minus_body"] = feature_value
+    df.loc[idx, "side_directional_streak"] = feature_value
+    df.loc[idx + 5, "close"] = 112.0 if continuation else 88.0
+
+
+def _build_learnable_supervised_frame(*, target_feature_value: float = 2.5) -> tuple[pd.DataFrame, int]:
+    target_idx = 150
+    df = _empty_supervised_frame(170)
+    signal_indices = list(range(0, 144, 6))
+    for offset, idx in enumerate(signal_indices):
+        continuation = offset % 2 == 0
+        feature_value = 2.5 if continuation else -2.5
+        _set_training_signal(df, idx, continuation=continuation, feature_value=feature_value)
+
+    df.loc[target_idx, "touched_side"] = "Upper"
+    df.loc[target_idx, "touch_side_sign"] = 1.0
+    df.loc[target_idx, "side_close_location"] = target_feature_value
+    df.loc[target_idx, "touch_wick_minus_body"] = target_feature_value
+    df.loc[target_idx, "side_directional_streak"] = target_feature_value
+    return df, target_idx
+
+
+def _build_continuation_analog_frame() -> tuple[pd.DataFrame, int]:
+    rows = 130
+    target_idx = 112
+    x = np.arange(rows, dtype=float)
+    close = 100.0 + (np.sin(x / 3.0) * 4.0) + (np.cos(x / 7.0) * 2.0)
+    df = _empty_supervised_frame(rows)
+    df["close"] = close
+    df["touched_side"] = "Upper"
+    df["touch_side_sign"] = 1.0
+    df["analysis_side_sign"] = 1.0
+    df["event_risk_blocked"] = False
+    df["touch_reentry_signal"] = -1.0
+    df["touch_wick_minus_body"] = 0.0
+    df["side_close_location"] = 0.65
+    df["ADX14"] = 24.0
+
+    for idx in range(rows - 10):
+        label = 1 if close[idx + 5] > close[idx] else 0
+        feature_value = 2.5 if label == 1 else -2.5
+        df.loc[idx, "side_ret_5d"] = feature_value
+        df.loc[idx, "side_ret_10d"] = feature_value
+        df.loc[idx, "side_ma20_slope_5"] = feature_value
+        df.loc[idx, "side_directional_streak"] = feature_value
+        df.loc[idx, "side_qqq_ret_5d"] = feature_value
+        df.loc[idx, "side_xlk_ret_5d"] = feature_value
+
+    for feature in (
+        "side_ret_5d",
+        "side_ret_10d",
+        "side_ma20_slope_5",
+        "side_directional_streak",
+        "side_qqq_ret_5d",
+        "side_xlk_ret_5d",
+    ):
+        df.loc[target_idx, feature] = 2.5
+
+    return df, target_idx
+
+
+def test_touch_without_training_data_does_not_force_prediction():
+    row = pd.Series(
+        {
+            "touched_side": "Upper",
+            "touch_reentry_signal": 0.0,
+            "close_in_range": 0.5,
+            "signed_close_location": 0.0,
+            "upper_wick_ratio": 0.3,
+            "body_pct": 0.3,
+            "ADX14": 22.0,
+            "trend_alignment": 0.0,
+            "ma20_slope_5": 0.0,
+            "ma50_slope_5": 0.0,
+            "MACD_hist_atr": 0.0,
+            "directional_streak": 0.0,
+            "consecutive_touch_count": 1.0,
+            "volume_range_interaction": 1.10,
+            "rel_volume_20": 1.0,
+            "volume_zscore_20": 0.0,
+            "weighted_volume_pressure_5": 0.0,
+            "obv_slope_5": 0.0,
+            "bandwidth_change_3d": 0.0,
+            "band_width_percentile": 0.5,
+            "realized_vol_percentile": 0.5,
+            "RSI14": 50.0,
+            "MFI14": 50.0,
+            "CCI20": 0.0,
+            "gap_atr": 0.0,
+            "range_expansion_5": 1.0,
+        }
+    )
+
+    decision = evaluate_row_decision(row)
+
+    assert decision["horizons"]["5d"]["status"] == "no_prediction"
+    assert decision["horizons"]["5d"]["no_prediction_reason"] == "insufficient_training_data"
+    assert decision["horizons"]["10d"]["status"] == "no_prediction"
+    assert decision["horizons"]["10d"]["no_prediction_reason"] == "insufficient_training_data"
+
+
+def test_adaptive_model_requires_enough_training_history():
+    df, target_idx = _build_learnable_supervised_frame(target_feature_value=2.5)
+
+    decision = evaluate_row_decision(df.iloc[target_idx], feature_df=df, row_index=target_idx)
+
+    horizon = decision["horizons"]["5d"]
+    assert horizon["model"]["training_sample_count"] == 24
+    assert horizon["status"] == "no_prediction"
+    assert horizon["no_prediction_reason"] == "insufficient_training_data"
+    assert horizon["model"]["type"] == "walk_forward_adaptive_analog"
+    assert horizon["model"]["continuation_training_count"] == 12
+    assert horizon["model"]["reversal_training_count"] == 12
+
+
+def test_adaptive_model_reports_low_history_instead_of_forcing_prediction():
+    df, target_idx = _build_learnable_supervised_frame(target_feature_value=0.0)
+
+    decision = evaluate_row_decision(df.iloc[target_idx], feature_df=df, row_index=target_idx)
+
+    horizon = decision["horizons"]["5d"]
+    assert horizon["model"]["training_sample_count"] == 24
+    assert horizon["status"] == "no_prediction"
+    assert horizon["no_prediction_reason"] == "insufficient_training_data"
+
+
+def test_training_matrix_uses_non_touch_rows_when_outcomes_are_known():
+    df = _empty_supervised_frame(30)
+    df["close"] = np.linspace(100.0, 129.0, 30)
+    df["analysis_side_sign"] = 1.0
+
+    x_train, y_train, indices = _build_training_matrix(df, target_idx=20, horizon=5)
+
+    assert len(x_train) == 16
+    assert len(y_train) == 16
+    assert indices.tolist() == list(range(16))
+    assert df.loc[indices, "touched_side"].isna().all()
+    assert set(y_train.tolist()) == {1.0}
+
+
+def test_adaptive_model_does_not_use_future_labeled_results():
+    df, target_idx = _build_learnable_supervised_frame(target_feature_value=2.5)
+    baseline = evaluate_row_decision(df.iloc[target_idx], feature_df=df, row_index=target_idx)
+
+    modified = df.copy()
+    future_signal_indices = list(range(target_idx + 6, target_idx + 6 + 48, 6))
+    for idx in future_signal_indices:
+        if idx + 5 >= len(modified):
+            break
+        _set_training_signal(modified, idx, continuation=False, feature_value=9.0)
+
+    changed = evaluate_row_decision(modified.iloc[target_idx], feature_df=modified, row_index=target_idx)
+
+    assert changed["horizons"]["5d"]["continuation_probability"] == pytest.approx(
+        baseline["horizons"]["5d"]["continuation_probability"]
+    )
+    assert changed["horizons"]["5d"]["predicted_direction"] == baseline["horizons"]["5d"]["predicted_direction"]
+
+
+def test_adaptive_model_can_make_validated_continuation_predictions():
+    df, target_idx = _build_continuation_analog_frame()
+
+    decision = evaluate_row_decision(df.iloc[target_idx], feature_df=df, row_index=target_idx)
+
+    horizon = decision["horizons"]["5d"]
+    assert horizon["status"] == "prediction"
+    assert horizon["predicted_direction"] == "continuation"
+    assert horizon["continuation_validation_precision"] >= 0.75
+    assert horizon["playbook"]["tier"] in {"core", "expansion", "opportunity", "regime"}
+
+
+def test_continuation_signal_is_vetoed_when_band_rejection_is_strong():
+    df, target_idx = _build_continuation_analog_frame()
+    df.loc[target_idx, "touch_reentry_signal"] = 1.0
+    df.loc[target_idx, "touch_wick_minus_body"] = 0.40
+    df.loc[target_idx, "side_close_location"] = 0.10
+
+    decision = evaluate_row_decision(df.iloc[target_idx], feature_df=df, row_index=target_idx)
+
+    horizon = decision["horizons"]["5d"]
+    assert horizon["predicted_direction"] != "continuation"
+    if horizon["status"] == "no_prediction":
+        assert horizon["no_prediction_reason"] == "continuation_rejected_at_band"
 
 
 def test_probabilities_are_bounded_between_zero_and_one():
     df = _force_lower_touch(_base_frame())
     payload = build_entry_decision_from_frame("TEST", df, earnings_dates=set())
 
-    assert 0.0 <= payload["stage_a"]["probability"] <= 1.0
-    assert 0.0 <= payload["stage_b"]["entry_probability"] <= 1.0
-    assert 0.0 <= payload["reversion_probability"] <= 1.0
-    assert 0.0 <= payload["continuation_probability"] <= 1.0
+    for horizon in ("5d", "10d"):
+        decision = payload["horizons"][horizon]
+        assert 0.0 <= decision["continuation_probability"] <= 1.0
+        assert 0.0 <= decision["reversal_probability"] <= 1.0
 
 
-@pytest.mark.parametrize(
-    "touched_side,enter_today,expected",
-    [
-        (None, False, "no_band_setup"),
-        ("Upper", True, "upper_band_mean_reversion"),
-        ("Lower", True, "lower_band_mean_reversion"),
-        ("Upper", False, "trend_continuation_trap"),
-        ("Lower", False, "trend_continuation_trap"),
-    ],
-)
-def test_setup_classification_mapping(touched_side, enter_today, expected):
-    assert _classify_setup(touched_side, enter_today) == expected
-
-
-def test_no_touch_maps_to_no_band_setup_in_payload():
-    df = _force_no_touch(_base_frame())
-    payload = build_entry_decision_from_frame("TEST", df, earnings_dates=set())
-
-    assert payload["touched_side"] is None
-    assert payload["setup_type"] == "no_band_setup"
-
-
-def test_top_reasons_are_ranked_by_absolute_contribution_and_capped_at_five():
+def test_top_reasons_are_ranked_by_absolute_contribution_and_capped_at_eight():
     df = _force_lower_touch(_base_frame())
     payload = build_entry_decision_from_frame("TEST", df, earnings_dates=set())
 
     reasons = payload["top_reasons"]
-    assert len(reasons) <= 5
+    assert len(reasons) <= 8
 
     magnitudes = [abs(r["contribution"]) for r in reasons]
     assert magnitudes == sorted(magnitudes, reverse=True)
 
 
-def test_accuracy_backtest_scoring_for_upper_lower_and_flat():
+def test_backtest_scores_5d_and_10d_direction_and_excludes_no_predictions():
     df = pd.DataFrame(
         {
-            "date": pd.bdate_range("2025-01-02", periods=5),
-            "close": [100.0, 99.0, 100.0, 100.0, 99.0],
-            "touched_side": ["Upper", "Lower", "Upper", "Lower", None],
+            "date": pd.bdate_range("2025-01-02", periods=16),
+            "close": [
+                100.0,
+                100.0,
+                100.0,
+                100.0,
+                100.0,
+                105.0,
+                105.0,
+                90.0,
+                100.0,
+                100.0,
+                90.0,
+                90.0,
+                100.0,
+                80.0,
+                100.0,
+                100.0,
+            ],
+            "touched_side": ["Upper", "Lower", "Upper", "Lower"] + [None] * 12,
         }
     )
-
-    # Predicted class must map from final decision (enter_today), not raw probabilities.
     decisions = {
-        0: {"enter_today": True, "stage_a": {"probability": 0.64}, "reversion_probability": 0.7},
-        1: {"enter_today": False, "stage_a": {"probability": 0.62}, "reversion_probability": 0.9},
-        2: {"enter_today": True, "stage_a": {"probability": 0.60}, "reversion_probability": 0.8},
-        3: {"enter_today": False, "stage_a": {"probability": 0.58}, "reversion_probability": 0.2},
+        0: _manual_decision(
+            _manual_horizon("prediction", "continuation", tier="core"),
+            _manual_horizon("prediction", "reversal", tier="expansion"),
+        ),
+        1: _manual_decision(
+            _manual_horizon("prediction", "continuation", tier="expansion"),
+            _manual_horizon("prediction", "continuation", tier="core"),
+        ),
+        2: _manual_decision(
+            _manual_horizon("no_prediction"),
+            _manual_horizon("no_prediction"),
+        ),
+        3: _manual_decision(
+            _manual_horizon("prediction", "continuation"),
+            _manual_horizon("prediction", "continuation"),
+        ),
     }
 
     backtest = run_decision_backtest(df, decisions_by_index=decisions)
 
-    assert backtest["sample_count"] == 4
-    assert backtest["correct_count"] == 2
-    assert backtest["accuracy"] == 0.5
-    assert backtest["reverse_call_count"] == 2
-    assert backtest["continue_call_count"] == 2
-    assert backtest["reverse_precision"] == 0.5
-    assert backtest["continue_precision"] == 0.5
-    assert backtest["tp_reverse"] == 1
-    assert backtest["fp_reverse"] == 1
-    assert backtest["tn_reverse"] == 1
-    assert backtest["fn_reverse"] == 1
-    assert backtest["flat_count"] == 1
+    assert backtest["5d"]["eligible_touch_count"] == 4
+    assert backtest["5d"]["prediction_count"] == 3
+    assert backtest["5d"]["sample_count"] == 3
+    assert backtest["5d"]["no_prediction_count"] == 1
+    assert backtest["5d"]["coverage"] == 0.75
+    assert backtest["5d"]["correct_count"] == 1
+    assert backtest["5d"]["accuracy"] == pytest.approx(1 / 3)
+    assert backtest["5d"]["continuation_call_count"] == 3
+    assert backtest["5d"]["continuation_correct_count"] == 1
+    assert backtest["5d"]["continuation_accuracy"] == pytest.approx(1 / 3)
+    assert backtest["5d"]["reversal_call_count"] == 0
+    assert backtest["5d"]["reversal_accuracy"] is None
+    assert backtest["5d"]["missed_reversal_count"] == 2
+    assert backtest["5d"]["flat_count"] == 1
+    assert backtest["5d"]["signal_tier_counts"] == {"core": 1, "expansion": 1}
 
-    by_date = {item["signal_date"]: item for item in backtest["recent_predictions"]}
-    assert by_date["2025-01-03"]["predicted_class"] == "continue"
-    assert by_date["2025-01-06"]["actual_next_day_direction"] == "flat"
-    assert by_date["2025-01-06"]["is_correct"] is False
+    assert backtest["10d"]["eligible_touch_count"] == 4
+    assert backtest["10d"]["prediction_count"] == 3
+    assert backtest["10d"]["no_prediction_count"] == 1
+    assert backtest["10d"]["correct_count"] == 3
+    assert backtest["10d"]["accuracy"] == 1.0
+    assert backtest["10d"]["continuation_call_count"] == 2
+    assert backtest["10d"]["continuation_accuracy"] == 1.0
+    assert backtest["10d"]["reversal_call_count"] == 1
+    assert backtest["10d"]["reversal_correct_count"] == 1
+    assert backtest["10d"]["reversal_accuracy"] == 1.0
+    assert backtest["10d"]["missed_reversal_count"] == 0
+    assert backtest["10d"]["signal_tier_counts"] == {"expansion": 1, "core": 1}
+
+    by_date = {item["signal_date"]: item for item in backtest["10d"]["recent_predictions"]}
+    assert by_date["2025-01-02"]["predicted_direction"] == "reversal"
+    assert by_date["2025-01-03"]["actual_direction"] == "continuation"
+
+
+def test_backtest_excludes_rows_without_enough_future_data():
+    df = pd.DataFrame(
+        {
+            "date": pd.bdate_range("2025-01-02", periods=12),
+            "close": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0, 109.0, 110.0, 111.0],
+            "touched_side": ["Upper"] + [None] * 9 + ["Upper", None],
+        }
+    )
+    decisions = {
+        0: _manual_decision(
+            _manual_horizon("prediction", "continuation"),
+            _manual_horizon("prediction", "continuation"),
+        ),
+        10: _manual_decision(
+            _manual_horizon("prediction", "continuation"),
+            _manual_horizon("prediction", "continuation"),
+        ),
+    }
+
+    backtest = run_decision_backtest(df, decisions_by_index=decisions)
+
+    assert backtest["5d"]["eligible_touch_count"] == 1
+    assert backtest["5d"]["prediction_count"] == 1
+    assert backtest["5d"]["incomplete_future_count"] == 1
+    assert backtest["10d"]["eligible_touch_count"] == 1
+    assert backtest["10d"]["prediction_count"] == 1
+    assert backtest["10d"]["incomplete_future_count"] == 1
+
+
+def test_reversal_scoring_treats_flat_within_half_atr_as_correct():
+    df = pd.DataFrame(
+        {
+            "date": pd.bdate_range("2025-01-02", periods=12),
+            "close": [100.0, 100.0, 100.0, 100.0, 100.0, 104.0, 100.0, 100.0, 100.0, 100.0, 112.0, 100.0],
+            "ATR14": [10.0] * 12,
+            "touched_side": ["Upper"] + [None] * 11,
+        }
+    )
+    decisions = {
+        0: _manual_decision(
+            _manual_horizon("prediction", "reversal"),
+            _manual_horizon("prediction", "reversal"),
+        )
+    }
+
+    backtest = run_decision_backtest(df, decisions_by_index=decisions)
+
+    assert backtest["5d"]["prediction_count"] == 1
+    assert backtest["5d"]["correct_count"] == 1
+    assert backtest["5d"]["reversal_accuracy"] == 1.0
+    assert backtest["5d"]["flat_count"] == 1
+    assert backtest["10d"]["correct_count"] == 0
+    assert backtest["10d"]["reversal_accuracy"] == 0.0
+
+
+def test_lower_band_reversal_veto_blocks_falling_knife_without_exhaustion():
+    row = pd.Series(
+        {
+            "touched_side": "Lower",
+            "analysis_side_sign": -1.0,
+            "side_ret_5d": 0.0622,
+            "side_ret_10d": 0.0477,
+            "side_weighted_volume_pressure_5": -0.1807,
+            "touch_wick_minus_body": 0.1603,
+            "touch_depth_atr": 0.441,
+            "consecutive_touch_count": 4.0,
+            "touch_reentry_signal": -1.0,
+            "side_qqq_ret_5d": 0.0082,
+            "side_xlk_ret_5d": -0.0033,
+            "band_width_percentile": 0.1822,
+            "bandwidth_change_5d": -0.0064,
+        }
+    )
+
+    assert _reversal_veto_reason(row, 10) == "falling_knife_no_exhaustion"
+
+
+def test_lower_band_reversal_veto_allows_exhaustion_setup():
+    row = pd.Series(
+        {
+            "touched_side": "Lower",
+            "analysis_side_sign": -1.0,
+            "side_ret_5d": 0.0672,
+            "side_ret_10d": 0.0865,
+            "side_weighted_volume_pressure_5": 0.4146,
+            "touch_wick_minus_body": -0.1908,
+            "touch_depth_atr": 0.4016,
+            "consecutive_touch_count": 6.0,
+            "touch_reentry_signal": -1.0,
+            "side_qqq_ret_5d": -0.006,
+            "side_xlk_ret_5d": -0.0264,
+            "band_width_percentile": 0.4372,
+            "bandwidth_change_5d": 0.0475,
+        }
+    )
+
+    assert _reversal_veto_reason(row, 10) is None
+
+
+def test_deployment_quality_gate_quarantines_weak_live_edge():
+    gate = _deployment_quality_gate(
+        {
+            "prediction_count": 2,
+            "accuracy": 0.0,
+            "reversal_call_count": 2,
+            "reversal_accuracy": 0.0,
+            "continuation_call_count": 0,
+            "continuation_accuracy": None,
+        }
+    )
+
+    assert gate["deployment_enabled"] is False
+    assert gate["status"] == "quarantined"
+    assert "weak_deployed_accuracy" in gate["failures"]
+    assert "weak_reverse_accuracy" in gate["failures"]
+
+
+def test_deployment_quality_gate_blocks_horizon_prediction_payload():
+    decision = _manual_decision(
+        _manual_horizon("prediction", "reversal", confidence=0.99),
+        _manual_horizon("no_prediction"),
+    )
+    gates = {
+        "5d": {
+            "deployment_enabled": False,
+            "status": "quarantined",
+            "failures": ["weak_reverse_accuracy"],
+            "raw_prediction_count": 2,
+            "raw_accuracy": 0.0,
+            "raw_reverse_accuracy": 0.0,
+            "raw_continue_accuracy": None,
+        }
+    }
+
+    gated = _apply_deployment_quality_gates_to_decision(decision, gates)
+
+    assert gated["horizons"]["5d"]["status"] == "no_prediction"
+    assert gated["horizons"]["5d"]["no_prediction_reason"] == "deployment_quality_gate_failed"
+    assert gated["horizons"]["5d"]["deployment_quality_gate"]["status"] == "quarantined"
+    assert gated["horizons"]["5d"]["blocked_prediction"]["predicted_direction"] == "reversal"
+
+
+def test_signal_quality_gate_keeps_good_family_when_direction_aggregate_is_weak():
+    rows = 42
+    df = pd.DataFrame(
+        {
+            "date": pd.bdate_range("2025-01-02", periods=rows),
+            "close": [100.0] * rows,
+            "touched_side": [None] * rows,
+        }
+    )
+    touch_indices = [0, 6, 12, 18]
+    actual_reversal = {0, 12, 18}
+    for idx in touch_indices:
+        df.loc[idx, "touched_side"] = "Upper"
+        df.loc[idx + 5, "close"] = 90.0 if idx in actual_reversal else 110.0
+
+    decisions = {
+        0: _manual_decision(
+            _manual_horizon("prediction", "reversal", tier="core", signal_id="bad_reversal"),
+            _manual_horizon("no_prediction"),
+        ),
+        6: _manual_decision(
+            _manual_horizon("prediction", "reversal", tier="core", signal_id="bad_reversal"),
+            _manual_horizon("no_prediction"),
+        ),
+        12: _manual_decision(
+            _manual_horizon("prediction", "reversal", tier="regime", signal_id="good_reversal"),
+            _manual_horizon("no_prediction"),
+        ),
+        18: _manual_decision(
+            _manual_horizon("prediction", "reversal", tier="regime", signal_id="good_reversal"),
+            _manual_horizon("no_prediction"),
+        ),
+    }
+
+    _, final_backtest = _finalize_deployment_quality(df, decisions)
+
+    assert final_backtest["5d"]["prediction_count"] == 2
+    assert final_backtest["5d"]["accuracy"] == 1.0
+    assert final_backtest["5d"]["reversal_accuracy"] == 1.0
+    assert final_backtest["5d"]["raw_reverse_accuracy"] == 0.75
+    assert final_backtest["5d"]["signal_tier_counts"] == {"regime": 2}
+
+
+def test_expanding_percentiles_do_not_use_future_rows():
+    df = _base_frame(120)
+    baseline = _prepare_feature_frame(df, symbol="TEST", earnings_dates=set())
+    modified = df.copy()
+    target_idx = 60
+    modified.loc[target_idx + 1 :, "BB_upper"] = modified.loc[target_idx + 1 :, "BB_upper"] * 8
+    modified.loc[target_idx + 1 :, "BB_lower"] = modified.loc[target_idx + 1 :, "BB_lower"] * 0.2
+    changed = _prepare_feature_frame(modified, symbol="TEST", earnings_dates=set())
+
+    assert changed.loc[target_idx, "band_width_percentile"] == pytest.approx(
+        baseline.loc[target_idx, "band_width_percentile"]
+    )
+    assert changed.loc[target_idx, "band_width_zscore_60"] == pytest.approx(
+        baseline.loc[target_idx, "band_width_zscore_60"]
+    )
+    assert changed.loc[target_idx, "squeeze_rank_120"] == pytest.approx(
+        baseline.loc[target_idx, "squeeze_rank_120"]
+    )
+
+
+def test_expanded_model_feature_frame_contains_ta_inputs():
+    feature_df = _prepare_feature_frame(_base_frame(180), symbol="TEST", earnings_dates=set())
+
+    for feature in _MODEL_FEATURES:
+        assert feature in feature_df.columns
+
+    advanced_columns = [
+        "EMA10",
+        "KAMA20",
+        "PPO",
+        "STOCH_k",
+        "STOCHRSI_k",
+        "ADOSC",
+        "NATR14",
+        "donchian55_position",
+        "side_ema20_slope_5",
+        "side_high_low_breakout_20",
+    ]
+    for column in advanced_columns:
+        assert feature_df[column].notna().any()
 
 
 def test_as_of_date_exact_trading_day_uses_same_date():
