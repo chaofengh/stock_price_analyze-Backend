@@ -98,6 +98,22 @@ def _manual_decision(h5, h10):
     }
 
 
+def _coverage_gate_frame(actual_by_index: dict[int, str]) -> pd.DataFrame:
+    rows = max(actual_by_index) + 16
+    df = pd.DataFrame(
+        {
+            "date": pd.bdate_range("2025-01-02", periods=rows),
+            "close": [100.0] * rows,
+            "touched_side": [None] * rows,
+        }
+    )
+    for idx, actual in actual_by_index.items():
+        df.loc[idx, "touched_side"] = "Upper"
+        df.loc[idx, "close"] = 100.0
+        df.loc[idx + 5, "close"] = 110.0 if actual == "continuation" else 90.0
+    return df
+
+
 def test_latest_no_touch_still_runs_model_for_today_exception():
     df = _force_no_touch(_base_frame())
     payload = build_entry_decision_from_frame("TEST", df, earnings_dates=set())
@@ -607,6 +623,111 @@ def test_signal_quality_gate_keeps_good_family_when_direction_aggregate_is_weak(
     assert final_backtest["5d"]["reversal_accuracy"] == 1.0
     assert final_backtest["5d"]["raw_reverse_accuracy"] == 0.75
     assert final_backtest["5d"]["signal_tier_counts"] == {"regime": 2}
+
+
+def test_coverage_expansion_reaches_40_percent_when_accuracy_is_preserved():
+    actual_by_index = {
+        0: "continuation",
+        6: "continuation",
+        12: "continuation",
+        18: "reversal",
+        24: "continuation",
+        30: "continuation",
+        36: "continuation",
+        42: "continuation",
+        48: "continuation",
+        54: "continuation",
+    }
+    df = _coverage_gate_frame(actual_by_index)
+    decisions = {
+        0: _manual_decision(
+            _manual_horizon("prediction", "continuation", tier="core", signal_id="core_continue"),
+            _manual_horizon("no_prediction"),
+        ),
+        6: _manual_decision(
+            _manual_horizon("prediction", "continuation", tier="core", signal_id="core_continue"),
+            _manual_horizon("no_prediction"),
+        ),
+        12: _manual_decision(
+            _manual_horizon("prediction", "continuation", tier="core", signal_id="core_continue"),
+            _manual_horizon("no_prediction"),
+        ),
+        18: _manual_decision(
+            _manual_horizon("prediction", "reversal", signal_id="isolated_reversal"),
+            _manual_horizon("no_prediction"),
+        ),
+        24: _manual_decision(
+            _manual_horizon("prediction", "reversal", signal_id="weak_reversal"),
+            _manual_horizon("no_prediction"),
+        ),
+    }
+
+    _, final_backtest = _finalize_deployment_quality(df, decisions)
+    five_day = final_backtest["5d"]
+    signals = five_day["direction_quality_gate"]["signals"]
+
+    assert five_day["coverage_target"] == 0.40
+    assert five_day["coverage"] == 0.4
+    assert five_day["prediction_count"] == 4
+    assert five_day["accuracy"] == 1.0
+    assert five_day["continuation_accuracy"] == 1.0
+    assert five_day["reversal_accuracy"] == 1.0
+    assert five_day["coverage_expansion_signal_count"] == 1
+    assert signals["reversal:isolated_reversal"]["status"] == "coverage_expansion"
+    assert signals["reversal:isolated_reversal"]["deployment_enabled"] is True
+    assert signals["reversal:weak_reversal"]["deployment_enabled"] is False
+
+
+def test_coverage_expansion_does_not_trade_accuracy_for_more_calls():
+    actual_by_index = {
+        0: "continuation",
+        6: "continuation",
+        12: "continuation",
+        18: "continuation",
+        24: "reversal",
+        30: "continuation",
+        36: "continuation",
+        42: "continuation",
+        48: "continuation",
+        54: "continuation",
+    }
+    df = _coverage_gate_frame(actual_by_index)
+    decisions = {
+        0: _manual_decision(
+            _manual_horizon("prediction", "continuation", tier="core", signal_id="core_continue"),
+            _manual_horizon("no_prediction"),
+        ),
+        6: _manual_decision(
+            _manual_horizon("prediction", "continuation", tier="core", signal_id="core_continue"),
+            _manual_horizon("no_prediction"),
+        ),
+        12: _manual_decision(
+            _manual_horizon("prediction", "continuation", tier="core", signal_id="core_continue"),
+            _manual_horizon("no_prediction"),
+        ),
+        18: _manual_decision(
+            _manual_horizon("prediction", "continuation", signal_id="weak_continue"),
+            _manual_horizon("no_prediction"),
+        ),
+        24: _manual_decision(
+            _manual_horizon("prediction", "continuation", signal_id="weak_continue"),
+            _manual_horizon("no_prediction"),
+        ),
+    }
+
+    _, final_backtest = _finalize_deployment_quality(df, decisions)
+    five_day = final_backtest["5d"]
+    weak_signal = five_day["direction_quality_gate"]["signals"]["continuation:weak_continue"]
+
+    assert five_day["coverage_target"] == 0.40
+    assert five_day["coverage"] == 0.3
+    assert five_day["prediction_count"] == 3
+    assert five_day["accuracy"] == 1.0
+    assert five_day["raw_prediction_count"] == 5
+    assert five_day["raw_accuracy"] == 0.8
+    assert five_day["coverage_expansion_signal_count"] == 0
+    assert weak_signal["deployment_enabled"] is False
+    assert weak_signal.get("coverage_expansion") is None
 
 
 def test_expanding_percentiles_do_not_use_future_rows():

@@ -2605,6 +2605,17 @@ def _prediction_book_passes_quality(metrics: dict) -> bool:
     return True
 
 
+def _prediction_book_preserves_accuracy(current_metrics: dict, trial_metrics: dict) -> bool:
+    for key in ("accuracy", "continuation_accuracy", "reversal_accuracy"):
+        current = current_metrics.get(key)
+        if current is None:
+            continue
+        trial = trial_metrics.get(key)
+        if trial is None or _safe_num(trial, 0.0) + _EPS < _safe_num(current, 0.0):
+            return False
+    return True
+
+
 def _apply_coverage_target_to_signal_gates(backtest: dict, signal_gates: dict[str, dict]) -> None:
     eligible_count = int(_safe_num(backtest.get("eligible_touch_count"), 0))
     if eligible_count <= 0:
@@ -2663,6 +2674,9 @@ def _apply_coverage_target_to_signal_gates(backtest: dict, signal_gates: dict[st
         trial = selected + candidate["rows"]
         trial_metrics = _prediction_book_metrics(trial)
         if not _prediction_book_passes_quality(trial_metrics):
+            continue
+        current_metrics = _prediction_book_metrics(selected)
+        if not _prediction_book_preserves_accuracy(current_metrics, trial_metrics):
             continue
         selected = trial
         selected_keys.append(candidate["key"])
