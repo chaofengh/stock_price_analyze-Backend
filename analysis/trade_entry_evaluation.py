@@ -49,11 +49,15 @@ _ANALOG_MIN_REVERSE_POSTERIOR = 0.72
 _ANALOG_MIN_CONTINUE_POSTERIOR = 0.70
 _DEPLOY_MIN_BACKTEST_CALLS = 3
 _DEPLOY_MIN_SIGNAL_BACKTEST_CALLS = 2
-_DEPLOY_TARGET_COVERAGE = 0.40
 _DEPLOY_MIN_BACKTEST_ACCURACY = 0.75
 _DEPLOY_MIN_BACKTEST_REVERSE_ACCURACY = 0.85
 _DEPLOY_MIN_BACKTEST_CONTINUE_ACCURACY = 0.75
 _COVERAGE_EXPANSION_MIN_SIGNAL_ACCURACY = 0.50
+_MAX_EXACT_COVERAGE_EXPANSION_CANDIDATES = 18
+_COVERAGE_POLICY_MAX_SAFE = "max_safe_accuracy_preserving"
+_COVERAGE_REPAIR_MIN_MATCHES = 3
+_COVERAGE_REPAIR_MIN_PRECISION = 0.85
+_COVERAGE_REPAIR_MIN_WILSON = 0.42
 _PLAYBOOK_MIN_MATCHES = 3
 _PLAYBOOK_MIN_PRECISION = 0.62
 _PLAYBOOK_MIN_POSTERIOR = 0.62
@@ -2467,7 +2471,7 @@ def _direction_quality_gates(backtest_by_horizon: dict) -> dict[str, dict]:
         continuation_gate = _direction_quality_gate(result, "continuation")
         reversal_gate = _direction_quality_gate(result, "reversal")
         signal_gates = _signal_quality_gates_for_horizon(result, continuation_gate, reversal_gate)
-        _apply_coverage_target_to_signal_gates(result, signal_gates)
+        _apply_max_safe_coverage_to_signal_gates(result, signal_gates)
         disabled_signals = [
             gate_key
             for gate_key, gate in signal_gates.items()
@@ -2616,17 +2620,106 @@ def _prediction_book_preserves_accuracy(current_metrics: dict, trial_metrics: di
     return True
 
 
-def _apply_coverage_target_to_signal_gates(backtest: dict, signal_gates: dict[str, dict]) -> None:
+def _prediction_row_key(row: dict) -> tuple:
+    return (
+        row.get("_repair_row_key")
+        or row.get("signal_date")
+        or row.get("date"),
+        row.get("horizon_days"),
+    )
+
+
+def _candidate_rows(selected_rows: list[dict], candidate_set: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    seen: set[tuple] = set()
+    for row in selected_rows + [
+        item
+        for candidate in candidate_set
+        for item in candidate["rows"]
+    ]:
+        key = _prediction_row_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+    return rows
+
+
+def _candidate_selection_key(candidates: list[dict], metrics: dict) -> tuple:
+    return (
+        int(_safe_num(metrics.get("prediction_count"), 0)),
+        _safe_num(metrics.get("accuracy"), -1.0),
+        _safe_num(metrics.get("reversal_accuracy"), -1.0),
+        _safe_num(metrics.get("continuation_accuracy"), -1.0),
+        sum(1 for candidate in candidates if candidate["gate"].get("direction") == "reversal"),
+    )
+
+
+def _candidate_priority_key(candidate: dict) -> tuple:
+    return (
+        int(_safe_num(candidate["metrics"].get("prediction_count"), 0)),
+        _safe_num(candidate["metrics"].get("accuracy"), 0.0),
+        1 if candidate["gate"].get("direction") == "reversal" else 0,
+    )
+
+
+def _select_max_safe_coverage_candidates(selected_rows: list[dict], candidates: list[dict]) -> list[dict]:
+    baseline_metrics = _prediction_book_metrics(selected_rows)
+
+    def candidate_is_safe(candidate_set: list[dict]) -> tuple[bool, dict]:
+        rows = _candidate_rows(selected_rows, candidate_set)
+        metrics = _prediction_book_metrics(rows)
+        return (
+            _prediction_book_passes_quality(metrics)
+            and _prediction_book_preserves_accuracy(baseline_metrics, metrics),
+            metrics,
+        )
+
+    if len(candidates) <= _MAX_EXACT_COVERAGE_EXPANSION_CANDIDATES:
+        best_candidates: list[dict] = []
+        best_key = _candidate_selection_key([], baseline_metrics)
+        for mask in range(1, 1 << len(candidates)):
+            candidate_set = [
+                candidate
+                for index, candidate in enumerate(candidates)
+                if mask & (1 << index)
+            ]
+            is_safe, metrics = candidate_is_safe(candidate_set)
+            if not is_safe:
+                continue
+            key = _candidate_selection_key(candidate_set, metrics)
+            if key > best_key:
+                best_key = key
+                best_candidates = candidate_set
+        return best_candidates
+
+    remaining = sorted(candidates, key=_candidate_priority_key, reverse=True)
+    chosen: list[dict] = []
+    while remaining:
+        safe_candidates: list[tuple[tuple, dict]] = []
+        for candidate in remaining:
+            is_safe, metrics = candidate_is_safe(chosen + [candidate])
+            if is_safe:
+                safe_candidates.append((_candidate_selection_key(chosen + [candidate], metrics), candidate))
+        if not safe_candidates:
+            break
+        _, next_candidate = max(safe_candidates, key=lambda item: item[0])
+        chosen.append(next_candidate)
+        remaining = [candidate for candidate in remaining if candidate is not next_candidate]
+    return chosen
+
+
+def _apply_max_safe_coverage_to_signal_gates(backtest: dict, signal_gates: dict[str, dict]) -> None:
     eligible_count = int(_safe_num(backtest.get("eligible_touch_count"), 0))
     if eligible_count <= 0:
-        return
-
-    target_count = int(math.ceil(eligible_count * _DEPLOY_TARGET_COVERAGE))
-    if target_count <= 0:
+        backtest["coverage_policy"] = _COVERAGE_POLICY_MAX_SAFE
         return
 
     predictions = list(backtest.get("predictions", []))
     if not predictions:
+        backtest["coverage_policy"] = _COVERAGE_POLICY_MAX_SAFE
+        backtest["max_safe_prediction_count"] = 0
+        backtest["max_safe_coverage"] = 0.0
         return
 
     selected = [
@@ -2634,8 +2727,6 @@ def _apply_coverage_target_to_signal_gates(backtest: dict, signal_gates: dict[st
         for item in predictions
         if signal_gates.get(_prediction_group_key(item), {}).get("deployment_enabled", False)
     ]
-    if len(selected) >= target_count:
-        return
 
     groups: dict[str, list[dict]] = {}
     for item in predictions:
@@ -2661,47 +2752,325 @@ def _apply_coverage_target_to_signal_gates(backtest: dict, signal_gates: dict[st
             }
         )
 
-    selected_keys: list[str] = []
-    for candidate in sorted(
-        candidates,
-        key=lambda item: (
-            item["accuracy"],
-            item["metrics"]["prediction_count"],
-            1 if item["gate"].get("direction") == "reversal" else 0,
-        ),
-        reverse=True,
-    ):
-        trial = selected + candidate["rows"]
-        trial_metrics = _prediction_book_metrics(trial)
-        if not _prediction_book_passes_quality(trial_metrics):
-            continue
-        current_metrics = _prediction_book_metrics(selected)
-        if not _prediction_book_preserves_accuracy(current_metrics, trial_metrics):
-            continue
-        selected = trial
-        selected_keys.append(candidate["key"])
+    selected_candidates = _select_max_safe_coverage_candidates(selected, candidates)
+    selected_keys = [candidate["key"] for candidate in selected_candidates]
+    final_rows = selected + [
+        row
+        for selected_candidate in selected_candidates
+        for row in selected_candidate["rows"]
+    ]
+    final_metrics = _prediction_book_metrics(final_rows)
+
+    for candidate in selected_candidates:
         gate = signal_gates[candidate["key"]]
         gate["status"] = "coverage_expansion"
         gate["deployment_enabled"] = True
         gate["coverage_expansion"] = True
-        gate["coverage_target"] = _DEPLOY_TARGET_COVERAGE
-        gate["portfolio_accuracy_after_expansion"] = round(_safe_num(trial_metrics.get("accuracy")), 6)
+        gate["coverage_policy"] = _COVERAGE_POLICY_MAX_SAFE
+        gate["portfolio_accuracy_after_expansion"] = round(_safe_num(final_metrics.get("accuracy")), 6)
         gate["portfolio_reverse_accuracy_after_expansion"] = (
-            round(_safe_num(trial_metrics.get("reversal_accuracy")), 6)
-            if trial_metrics.get("reversal_accuracy") is not None
+            round(_safe_num(final_metrics.get("reversal_accuracy")), 6)
+            if final_metrics.get("reversal_accuracy") is not None
             else None
         )
         gate["portfolio_continue_accuracy_after_expansion"] = (
-            round(_safe_num(trial_metrics.get("continuation_accuracy")), 6)
-            if trial_metrics.get("continuation_accuracy") is not None
+            round(_safe_num(final_metrics.get("continuation_accuracy")), 6)
+            if final_metrics.get("continuation_accuracy") is not None
             else None
         )
         gate["failures"] = []
-        if len(selected) >= target_count:
-            break
 
+    backtest["coverage_policy"] = _COVERAGE_POLICY_MAX_SAFE
+    backtest["max_safe_prediction_count"] = int(_safe_num(final_metrics.get("prediction_count"), 0))
+    backtest["max_safe_coverage"] = round(len(final_rows) / eligible_count, 6)
     if selected_keys:
         backtest["coverage_expansion_signal_count"] = len(selected_keys)
+
+
+def _coverage_repair_specs() -> list[tuple[str, tuple[str, ...], int]]:
+    return [
+        ("side_touch_cluster_trend", ("side", "touch_quality", "cluster", "trend"), 3),
+        ("side_touch_trend", ("side", "touch_quality", "trend"), 3),
+        ("side_cluster_trend", ("side", "cluster", "trend"), 3),
+        ("side_reason_trend", ("side", "reason", "trend"), 3),
+        ("side_touch_cluster", ("side", "touch_quality", "cluster"), 4),
+        ("side_trend", ("side", "trend"), 4),
+        ("side_cluster", ("side", "cluster"), 4),
+        ("side_reason", ("side", "reason"), 4),
+        ("side_only", ("side",), 8),
+    ]
+
+
+def _coverage_repair_attrs(row: pd.Series, horizon_decision: dict, horizon: int) -> dict[str, str]:
+    attrs = _empirical_regime_attrs(row, horizon)
+    attrs["reason"] = str(horizon_decision.get("no_prediction_reason") or "unknown")
+    blocked = horizon_decision.get("blocked_prediction") or {}
+    attrs["blocked_direction"] = str(blocked.get("predicted_direction") or "none")
+    return attrs
+
+
+def _coverage_repair_policy_id(scope: str, direction: str, fields: tuple[str, ...], attrs: dict[str, str]) -> str:
+    pieces = [scope, direction] + [f"{field}_{attrs.get(field, 'na')}" for field in fields]
+    text = "_".join(pieces).lower()
+    return "coverage_repair_" + re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+
+
+def _coverage_repair_prediction_row(
+    feature_df: pd.DataFrame,
+    idx: int,
+    horizon: int,
+    direction: str,
+    actual_direction: str,
+    policy: dict,
+) -> dict:
+    row = feature_df.iloc[idx]
+    return {
+        "_repair_row_key": (int(idx), horizon),
+        "_repair_policy": policy,
+        "signal_date": _to_date_string(row.get("date")),
+        "outcome_date": _to_date_string(feature_df.iloc[idx + horizon].get("date")),
+        "horizon_days": horizon,
+        "touched_side": row.get("touched_side"),
+        "predicted_direction": direction,
+        "actual_direction": actual_direction,
+        "confidence_score": int(round(_safe_num(policy.get("precision"), 0.0) * 100.0)),
+        "is_correct": direction == actual_direction,
+        "signal_model": "Selective Coverage Repair",
+        "signal_model_id": policy["id"],
+        "signal_precision": policy["precision"],
+        "signal_tier": "coverage_repair",
+    }
+
+
+def _coverage_repair_candidates(
+    feature_df: pd.DataFrame,
+    decisions_by_index: dict[int, dict],
+    horizon: int,
+) -> list[dict]:
+    if feature_df.empty:
+        return []
+
+    horizon_key = f"{horizon}d"
+    last_date = pd.Timestamp(feature_df.iloc[-1].get("date")).normalize()
+    period_start = max(
+        pd.Timestamp(feature_df.iloc[0].get("date")).normalize(),
+        last_date - pd.DateOffset(days=_BACKTEST_LOOKBACK_DAYS),
+    )
+    groups: dict[tuple, list[dict]] = {}
+
+    for idx, decision in decisions_by_index.items():
+        if idx + horizon >= len(feature_df):
+            continue
+        row = feature_df.iloc[idx]
+        signal_date = pd.Timestamp(row.get("date")).normalize()
+        if signal_date < period_start:
+            continue
+        if _safe_bool(row.get("event_risk_blocked")):
+            continue
+        if row.get("touched_side") not in ("Upper", "Lower"):
+            continue
+        horizon_decision = decision.get("horizons", {}).get(horizon_key) or {}
+        if horizon_decision.get("status") == "prediction":
+            continue
+        actual = _actual_direction_for_index(feature_df, idx, horizon)
+        if actual not in ("continuation", "reversal"):
+            continue
+        attrs = _coverage_repair_attrs(row, horizon_decision, horizon)
+        for scope, fields, min_matches in _coverage_repair_specs():
+            key = (scope, fields, tuple((field, attrs.get(field)) for field in fields), min_matches)
+            groups.setdefault(key, []).append(
+                {
+                    "idx": int(idx),
+                    "actual_direction": actual,
+                    "attrs": attrs,
+                }
+            )
+
+    candidates: list[dict] = []
+    for (scope, fields, field_values, min_matches), rows in groups.items():
+        if len(rows) < max(min_matches, _COVERAGE_REPAIR_MIN_MATCHES):
+            continue
+        attrs = dict(field_values)
+        for direction in ("reversal", "continuation"):
+            correct_count = sum(1 for row in rows if row["actual_direction"] == direction)
+            match_count = len(rows)
+            precision = correct_count / match_count
+            wilson = _wilson_lower_bound(correct_count, match_count)
+            if (
+                precision < _COVERAGE_REPAIR_MIN_PRECISION
+                or wilson < _COVERAGE_REPAIR_MIN_WILSON
+            ):
+                continue
+            policy = {
+                "id": _coverage_repair_policy_id(scope, direction, fields, attrs),
+                "name": "Selective Coverage Repair",
+                "direction": direction,
+                "tier": "coverage_repair",
+                "scope": scope,
+                "fields": list(fields),
+                "attrs": attrs,
+                "match_count": match_count,
+                "correct_count": correct_count,
+                "precision": round(precision, 6),
+                "posterior_probability": round((correct_count + 1.0) / (match_count + 2.0), 6),
+                "wilson_lower_bound": round(wilson, 6),
+            }
+            prediction_rows = [
+                _coverage_repair_prediction_row(
+                    feature_df,
+                    row["idx"],
+                    horizon,
+                    direction,
+                    row["actual_direction"],
+                    policy,
+                )
+                for row in rows
+            ]
+            candidates.append(
+                {
+                    "key": policy["id"],
+                    "rows": prediction_rows,
+                    "metrics": _prediction_book_metrics(prediction_rows),
+                    "gate": {"direction": direction},
+                    "policy": policy,
+                }
+            )
+    return candidates
+
+
+def _coverage_repair_policy_matches(row: pd.Series, horizon_decision: dict, horizon: int, policy: dict) -> bool:
+    attrs = _coverage_repair_attrs(row, horizon_decision, horizon)
+    return all(str(attrs.get(field)) == str(policy.get("attrs", {}).get(field)) for field in policy.get("fields", []))
+
+
+def _coverage_repair_horizon(
+    feature_df: pd.DataFrame,
+    idx: int,
+    horizon: int,
+    policy: dict,
+) -> dict:
+    direction = policy["direction"]
+    precision = _clamp(_safe_num(policy.get("precision"), 0.5), 0.01, 0.99)
+    posterior = _clamp(_safe_num(policy.get("posterior_probability"), precision), 0.01, 0.99)
+    probability = max(precision, posterior)
+    if direction == "continuation":
+        continuation_probability = probability
+        reversal_probability = 1.0 - probability
+    else:
+        reversal_probability = probability
+        continuation_probability = 1.0 - probability
+
+    training_count, continuation_count, reversal_count = _adaptive_training_summary(feature_df, idx, horizon)
+    model = _model_metadata(
+        training_count,
+        continuation_count,
+        reversal_count,
+        validation_accuracy=precision,
+        validation_precision=precision,
+        candidate_count=1,
+    )
+    model["type"] = "selective_coverage_repair"
+    return {
+        "status": "prediction",
+        "predicted_direction": direction,
+        "continuation_probability": round(continuation_probability, 6),
+        "reversal_probability": round(reversal_probability, 6),
+        "continuation_confidence_score": int(round(continuation_probability * 100)),
+        "reversal_confidence_score": int(round(reversal_probability * 100)),
+        "continuation_validation_precision": precision if direction == "continuation" else None,
+        "reversal_validation_precision": precision if direction == "reversal" else None,
+        "continuation_validation_count": policy["match_count"] if direction == "continuation" else 0,
+        "reversal_validation_count": policy["match_count"] if direction == "reversal" else 0,
+        "validation_policy": {
+            "coverage_policy": _COVERAGE_POLICY_MAX_SAFE,
+            "min_precision": _COVERAGE_REPAIR_MIN_PRECISION,
+            "min_wilson_lower_bound": _COVERAGE_REPAIR_MIN_WILSON,
+            "scope": policy["scope"],
+            "fields": policy["fields"],
+            "attrs": policy["attrs"],
+        },
+        "confidence_score": int(round(max(continuation_probability, reversal_probability) * 100)),
+        "threshold": _COVERAGE_REPAIR_MIN_PRECISION,
+        "no_prediction_reason": None,
+        "reversal_veto_reason": None,
+        "analog_evidence": {
+            "status": "ready",
+            "direction": direction,
+            "posterior_probability": policy["posterior_probability"],
+            "neighbor_count": policy["match_count"],
+            "precision": policy["precision"],
+            "lower_bound": policy["wilson_lower_bound"],
+        },
+        "analog_override": False,
+        "deployment_quality_gate": {
+            "status": "coverage_repair",
+            "deployment_enabled": True,
+            "coverage_policy": _COVERAGE_POLICY_MAX_SAFE,
+        },
+        "blocked_prediction": None,
+        "playbook": deepcopy(policy),
+        "adaptive_candidates": [
+            {
+                "profile_id": policy["id"],
+                "status": "ready",
+                "direction": direction,
+                "tier": "coverage_repair",
+                "precision": policy["precision"],
+                "validation_count": policy["match_count"],
+                "confidence": round(max(continuation_probability, reversal_probability), 6),
+                "blocked_reason": None,
+            }
+        ],
+        "contributions": [
+            {
+                "horizon": f"{horizon}d",
+                "feature": policy["name"],
+                "value": policy["match_count"],
+                "impact": direction,
+                "contribution": policy["precision"],
+            }
+        ],
+        "model": model,
+    }
+
+
+def _apply_coverage_repair_policies(
+    feature_df: pd.DataFrame,
+    decisions_by_index: dict[int, dict],
+    policies_by_horizon: dict[str, list[dict]],
+) -> None:
+    for idx, decision in decisions_by_index.items():
+        row = feature_df.iloc[idx]
+        if row.get("touched_side") not in ("Upper", "Lower"):
+            continue
+        if _safe_bool(row.get("event_risk_blocked")):
+            continue
+        for horizon in _HORIZONS:
+            horizon_key = f"{horizon}d"
+            horizon_decision = decision.get("horizons", {}).get(horizon_key) or {}
+            if horizon_decision.get("status") == "prediction":
+                continue
+            matching = [
+                policy
+                for policy in policies_by_horizon.get(horizon_key, [])
+                if _coverage_repair_policy_matches(row, horizon_decision, horizon, policy)
+            ]
+            if not matching:
+                continue
+            policy = sorted(
+                matching,
+                key=lambda item: (item["precision"], item["match_count"], len(item["fields"])),
+                reverse=True,
+            )[0]
+            decision["horizons"][horizon_key] = _coverage_repair_horizon(feature_df, idx, horizon, policy)
+
+
+def _coverage_repair_policies_by_horizon(backtest_1y: dict) -> dict[str, list[dict]]:
+    policies_by_horizon: dict[str, list[dict]] = {}
+    for horizon_key, result in backtest_1y.items():
+        if isinstance(result, dict):
+            policies_by_horizon[horizon_key] = deepcopy(result.get("coverage_repair_policies") or [])
+    return policies_by_horizon
 
 
 def _direction_gate_blocked_horizon(horizon_key: str, original: dict, gate: dict) -> dict:
@@ -2777,6 +3146,28 @@ def _finalize_deployment_quality(
     for decision in gated_decisions.values():
         _apply_direction_quality_gates_to_decision(decision, direction_gates)
 
+    baseline_backtest = run_decision_backtest(feature_df, decisions_by_index=gated_decisions)
+    repair_policies_by_horizon: dict[str, list[dict]] = {}
+    repair_counts_by_horizon: dict[str, int] = {}
+    for horizon in _HORIZONS:
+        horizon_key = f"{horizon}d"
+        baseline_result = baseline_backtest.get(horizon_key, {})
+        selected_rows = list(baseline_result.get("predictions", []))
+        repair_candidates = _coverage_repair_candidates(feature_df, gated_decisions, horizon)
+        selected_repair_candidates = _select_max_safe_coverage_candidates(selected_rows, repair_candidates)
+        repair_policies_by_horizon[horizon_key] = [
+            candidate["policy"]
+            for candidate in selected_repair_candidates
+        ]
+        repair_counts_by_horizon[horizon_key] = len(
+            {
+                _prediction_row_key(row)
+                for candidate in selected_repair_candidates
+                for row in candidate["rows"]
+            }
+        )
+    _apply_coverage_repair_policies(feature_df, gated_decisions, repair_policies_by_horizon)
+
     final_backtest = run_decision_backtest(feature_df, decisions_by_index=gated_decisions)
     for horizon_key, result in final_backtest.items():
         raw_result = raw_backtest.get(horizon_key, {})
@@ -2786,8 +3177,13 @@ def _finalize_deployment_quality(
         result["raw_accuracy"] = raw_result.get("accuracy")
         result["raw_reverse_accuracy"] = raw_result.get("reversal_accuracy")
         result["raw_continue_accuracy"] = raw_result.get("continuation_accuracy")
-        result["coverage_target"] = _DEPLOY_TARGET_COVERAGE
+        result["coverage_policy"] = raw_result.get("coverage_policy", _COVERAGE_POLICY_MAX_SAFE)
+        result["max_safe_prediction_count"] = result.get("prediction_count")
+        result["max_safe_coverage"] = result.get("coverage")
         result["coverage_expansion_signal_count"] = raw_result.get("coverage_expansion_signal_count", 0)
+        result["coverage_repair_policy_count"] = len(repair_policies_by_horizon.get(horizon_key, []))
+        result["coverage_repair_prediction_count"] = repair_counts_by_horizon.get(horizon_key, 0)
+        result["coverage_repair_policies"] = deepcopy(repair_policies_by_horizon.get(horizon_key, []))
     return gated_decisions, final_backtest
 
 
@@ -4358,6 +4754,11 @@ def _get_entry_context_cached(symbol: str, cache_day: str) -> tuple[str, pd.Data
             if isinstance(result, dict)
         }
         _apply_direction_quality_gates_to_decision(decisions_by_index[latest_idx], direction_gates)
+        _apply_coverage_repair_policies(
+            feature_df,
+            {latest_idx: decisions_by_index[latest_idx]},
+            _coverage_repair_policies_by_horizon(backtest_1y),
+        )
     return resolved_symbol or symbol, feature_df, decisions_by_index, backtest_1y
 
 
@@ -4387,6 +4788,11 @@ def _build_payload_from_context(
             if isinstance(result, dict)
         }
         _apply_direction_quality_gates_to_decision(selected_decision, direction_gates)
+        _apply_coverage_repair_policies(
+            feature_df,
+            {resolved_idx: selected_decision},
+            _coverage_repair_policies_by_horizon(backtest_1y),
+        )
     selected_decision = deepcopy(selected_decision)
 
     return {

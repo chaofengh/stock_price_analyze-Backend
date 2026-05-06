@@ -625,7 +625,7 @@ def test_signal_quality_gate_keeps_good_family_when_direction_aggregate_is_weak(
     assert final_backtest["5d"]["signal_tier_counts"] == {"regime": 2}
 
 
-def test_coverage_expansion_reaches_40_percent_when_accuracy_is_preserved():
+def test_coverage_expansion_maximizes_safe_calls_when_accuracy_is_preserved():
     actual_by_index = {
         0: "continuation",
         6: "continuation",
@@ -660,21 +660,35 @@ def test_coverage_expansion_reaches_40_percent_when_accuracy_is_preserved():
             _manual_horizon("prediction", "reversal", signal_id="weak_reversal"),
             _manual_horizon("no_prediction"),
         ),
+        30: _manual_decision(
+            _manual_horizon("prediction", "continuation", signal_id="extra_continue"),
+            _manual_horizon("no_prediction"),
+        ),
+        36: _manual_decision(
+            _manual_horizon("prediction", "continuation", signal_id="extra_continue"),
+            _manual_horizon("no_prediction"),
+        ),
     }
 
     _, final_backtest = _finalize_deployment_quality(df, decisions)
     five_day = final_backtest["5d"]
     signals = five_day["direction_quality_gate"]["signals"]
 
-    assert five_day["coverage_target"] == 0.40
-    assert five_day["coverage"] == 0.4
-    assert five_day["prediction_count"] == 4
+    assert "coverage_target" not in five_day
+    assert five_day["coverage_policy"] == "max_safe_accuracy_preserving"
+    assert five_day["coverage"] == 1.0
+    assert five_day["max_safe_coverage"] == 1.0
+    assert five_day["prediction_count"] == 10
+    assert five_day["max_safe_prediction_count"] == 10
     assert five_day["accuracy"] == 1.0
     assert five_day["continuation_accuracy"] == 1.0
     assert five_day["reversal_accuracy"] == 1.0
     assert five_day["coverage_expansion_signal_count"] == 1
+    assert five_day["coverage_repair_prediction_count"] == 4
     assert signals["reversal:isolated_reversal"]["status"] == "coverage_expansion"
     assert signals["reversal:isolated_reversal"]["deployment_enabled"] is True
+    assert signals["continuation:extra_continue"]["status"] == "passed"
+    assert signals["continuation:extra_continue"]["deployment_enabled"] is True
     assert signals["reversal:weak_reversal"]["deployment_enabled"] is False
 
 
@@ -719,13 +733,17 @@ def test_coverage_expansion_does_not_trade_accuracy_for_more_calls():
     five_day = final_backtest["5d"]
     weak_signal = five_day["direction_quality_gate"]["signals"]["continuation:weak_continue"]
 
-    assert five_day["coverage_target"] == 0.40
-    assert five_day["coverage"] == 0.3
-    assert five_day["prediction_count"] == 3
+    assert "coverage_target" not in five_day
+    assert five_day["coverage_policy"] == "max_safe_accuracy_preserving"
+    assert five_day["coverage"] == 0.8
+    assert five_day["max_safe_coverage"] == 0.8
+    assert five_day["prediction_count"] == 8
+    assert five_day["max_safe_prediction_count"] == 8
     assert five_day["accuracy"] == 1.0
     assert five_day["raw_prediction_count"] == 5
     assert five_day["raw_accuracy"] == 0.8
     assert five_day["coverage_expansion_signal_count"] == 0
+    assert five_day["coverage_repair_prediction_count"] == 5
     assert weak_signal["deployment_enabled"] is False
     assert weak_signal.get("coverage_expansion") is None
 
