@@ -4663,6 +4663,24 @@ def build_entry_decision_from_frame(
     earnings_symbol: str | None = None,
     context_frames: dict[str, pd.DataFrame] | None = None,
 ) -> dict:
+    context = build_entry_decision_context_from_frame(
+        symbol,
+        frame,
+        earnings_dates=earnings_dates,
+        earnings_symbol=earnings_symbol,
+        context_frames=context_frames,
+    )
+    return build_entry_decision_from_context(context, as_of_date=as_of_date)
+
+
+def build_entry_decision_context_from_frame(
+    symbol: str,
+    frame: pd.DataFrame,
+    *,
+    earnings_dates: set[pd.Timestamp] | None = None,
+    earnings_symbol: str | None = None,
+    context_frames: dict[str, pd.DataFrame] | None = None,
+) -> dict:
     normalized = normalize_symbol(symbol)
     if not normalized:
         raise ValueError("Missing symbol for entry decision")
@@ -4677,9 +4695,35 @@ def build_entry_decision_from_frame(
     )
     decisions_by_index: dict[int, dict] = {}
     decisions_by_index, backtest_1y = _finalize_deployment_quality(feature_df, decisions_by_index)
+    return {
+        "symbol": normalized,
+        "feature_df": feature_df,
+        "decisions_by_index": decisions_by_index,
+        "backtest_1y": backtest_1y,
+    }
 
+
+def build_entry_decision_from_context(
+    context: dict,
+    *,
+    as_of_date: str | pd.Timestamp | None = None,
+) -> dict:
+    if not isinstance(context, dict):
+        raise ValueError("Entry decision context is unavailable.")
+    symbol = normalize_symbol(context.get("symbol"))
+    feature_df = context.get("feature_df")
+    decisions_by_index = context.get("decisions_by_index")
+    backtest_1y = context.get("backtest_1y")
+    if not symbol:
+        raise ValueError("Entry decision context is missing a symbol.")
+    if feature_df is None or getattr(feature_df, "empty", True):
+        raise ValueError(f"Entry decision context for {symbol} has no feature data.")
+    if not isinstance(decisions_by_index, dict):
+        decisions_by_index = {}
+    if not isinstance(backtest_1y, dict):
+        backtest_1y = {}
     return _build_payload_from_context(
-        normalized,
+        symbol,
         as_of_date=as_of_date,
         feature_df=feature_df,
         decisions_by_index=decisions_by_index,
@@ -4823,20 +4867,30 @@ def get_entry_decision(symbol: str, as_of_date: str | None = None) -> dict:
     if not normalized:
         raise ValueError("Missing symbol for entry decision")
 
-    _, feature_df, decisions_by_index, backtest_1y = _get_entry_context_cached(normalized, _entry_cache_day())
+    context = get_entry_decision_context(normalized)
+    return build_entry_decision_from_context(context, as_of_date=as_of_date)
 
-    return _build_payload_from_context(
-        normalized,
-        as_of_date=as_of_date,
-        feature_df=feature_df,
-        decisions_by_index=decisions_by_index,
-        backtest_1y=backtest_1y,
-    )
+
+def get_entry_decision_context(symbol: str) -> dict:
+    normalized = normalize_symbol(symbol)
+    if not normalized:
+        raise ValueError("Missing symbol for entry decision")
+
+    _, feature_df, decisions_by_index, backtest_1y = _get_entry_context_cached(normalized, _entry_cache_day())
+    return {
+        "symbol": normalized,
+        "feature_df": feature_df,
+        "decisions_by_index": decisions_by_index,
+        "backtest_1y": backtest_1y,
+    }
 
 
 __all__ = [
+    "build_entry_decision_context_from_frame",
+    "build_entry_decision_from_context",
     "build_entry_decision_from_frame",
     "evaluate_row_decision",
+    "get_entry_decision_context",
     "get_entry_decision",
     "run_decision_backtest",
 ]

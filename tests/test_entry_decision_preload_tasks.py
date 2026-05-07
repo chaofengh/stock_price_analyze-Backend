@@ -35,7 +35,7 @@ def test_default_worker_timeout_allows_realistic_cold_entry_model_runtime():
 
 
 def test_preload_skips_without_cached_alert_scan():
-    with patch("tasks.entry_decision_preload_tasks._compute_preload_payloads") as mock_compute:
+    with patch("tasks.entry_decision_preload_tasks._compute_preload_artifacts") as mock_compute:
         result = preload_tasks.preload_entry_decisions_from_latest_alerts(
             max_symbols=1,
             min_idle_seconds=0,
@@ -55,7 +55,7 @@ def test_preload_loads_one_alert_symbol_per_idle_pass():
     )
 
     def _entry_payloads(symbols, as_of_date):
-        return {
+        loaded = {
             symbols[0]: {
                 "symbol": symbols[0],
                 "requested_as_of_date": as_of_date,
@@ -65,13 +65,15 @@ def test_preload_loads_one_alert_symbol_per_idle_pass():
                 "backtest_1y": {},
                 "chart_data": [],
             }
-        }, {}
+        }
+        contexts = {symbols[0]: {"symbol": symbols[0], "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}}}
+        return loaded, contexts, {}
 
     with (
         patch.dict(os.environ, {"ENTRY_DECISION_PRELOAD_FULL_ENABLED": "1", "ENTRY_DECISION_PRELOAD_INLINE": "1"}),
         patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
         patch(
-            "tasks.entry_decision_preload_tasks._compute_preload_payloads",
+            "tasks.entry_decision_preload_tasks._compute_preload_artifacts",
             side_effect=_entry_payloads,
         ) as mock_compute,
     ):
@@ -108,7 +110,7 @@ def test_preload_skips_without_snapshot_when_full_preload_disabled():
     with (
         patch.dict(os.environ, {"ENTRY_DECISION_PRELOAD_FULL_ENABLED": "0"}),
         patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
-        patch("tasks.entry_decision_preload_tasks._compute_preload_payloads") as mock_compute,
+        patch("tasks.entry_decision_preload_tasks._compute_preload_artifacts") as mock_compute,
         patch("tasks.entry_decision_preload_tasks._start_preload_worker") as mock_start,
     ):
         result = preload_tasks.preload_entry_decisions_from_latest_alerts(
@@ -151,13 +153,13 @@ def test_preload_uses_batched_price_data_without_request_compute_path():
             return_value={"AMD": _frame(), "QQQ": _frame(), "XLK": _frame()},
         ) as mock_prepare,
         patch(
-            "tasks.entry_decision_preload_tasks.build_entry_decision_from_frame",
-            return_value={
-                "symbol": "AMD",
-                "requested_as_of_date": "2026-04-15",
-                "as_of_date": "2026-04-15",
-            },
-        ) as mock_build,
+            "tasks.entry_decision_preload_tasks.build_entry_decision_context_from_frame",
+            return_value={"symbol": "AMD", "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}},
+        ) as mock_build_context,
+        patch(
+            "tasks.entry_decision_preload_tasks.build_entry_decision_from_context",
+            return_value={"symbol": "AMD", "requested_as_of_date": "2026-04-15", "as_of_date": "2026-04-15"},
+        ) as mock_build_payload,
     ):
         loaded, failed = preload_tasks._compute_preload_payloads(["AMD"], "2026-04-15")
 
@@ -167,9 +169,13 @@ def test_preload_uses_batched_price_data_without_request_compute_path():
     assert mock_prepare.call_args.args[0] == ["AMD", "QQQ", "XLK"]
     assert mock_prepare.call_args.kwargs["period"] == "2y"
     assert mock_prepare.call_args.kwargs["threads"] is False
-    mock_build.assert_called_once()
-    assert mock_build.call_args.kwargs["earnings_dates"] == set()
-    assert set(mock_build.call_args.kwargs["context_frames"].keys()) == {"QQQ", "XLK"}
+    mock_build_context.assert_called_once()
+    assert mock_build_context.call_args.kwargs["earnings_dates"] == set()
+    assert set(mock_build_context.call_args.kwargs["context_frames"].keys()) == {"QQQ", "XLK"}
+    mock_build_payload.assert_called_once_with(
+        {"symbol": "AMD", "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}},
+        as_of_date="2026-04-15",
+    )
 
 
 def test_preload_enters_global_backoff_when_price_source_returns_no_frames():

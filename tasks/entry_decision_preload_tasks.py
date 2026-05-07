@@ -24,7 +24,11 @@ import pytz
 
 from analysis.data_fetcher_utils import normalize_symbol, symbol_candidates
 from analysis.data_preparation import prepare_stock_data
-from analysis.trade_entry_evaluation import build_entry_decision_from_frame, get_entry_decision
+from analysis.trade_entry_evaluation import (
+    build_entry_decision_context_from_frame,
+    build_entry_decision_from_context,
+    get_entry_decision_context,
+)
 from utils.serialization import convert_to_python_types
 
 logger = logging.getLogger(__name__)
@@ -32,10 +36,6 @@ logger = logging.getLogger(__name__)
 _CHICAGO_TZ = pytz.timezone("America/Chicago")
 
 DEFAULT_BATCH_SIZE = max(1, int(os.getenv("ENTRY_DECISION_PRELOAD_BATCH_SIZE", "2")))
-DEFAULT_ALERT_WORKER_CONCURRENCY = max(
-    1,
-    int(os.getenv("ENTRY_DECISION_ALERT_PRELOAD_CONCURRENCY", "2")),
-)
 DEFAULT_MIN_IDLE_SECONDS = max(
     0.0,
     float(os.getenv("ENTRY_DECISION_PRELOAD_MIN_IDLE_SECONDS", "2.0")),
@@ -63,11 +63,11 @@ _active_requests = 0
 _last_request_activity_at = 0.0
 _global_retry_after = 0.0
 _payload_cache: dict[tuple[str, str, str], dict] = {}
+_context_cache: dict[tuple[str, str], dict] = {}
 _failure_retry_after: dict[tuple[str, str, str], float] = {}
 _interactive_failure_retry_after: dict[tuple[str, str, str], float] = {}
 _alert_preload_queue: list[tuple[str, str, str]] = []
 _alert_preload_queued: set[tuple[str, str, str]] = set()
-_alert_worker_processes: dict[tuple[str, str, str], dict] = {}
 _worker_process = None
 _worker_result_path: str | None = None
 _worker_started_at = 0.0
@@ -119,19 +119,35 @@ def _cache_key(symbol: str, as_of_date: str | None = None) -> tuple[str, str, st
     return _cache_day(), normalize_symbol(symbol), _normalize_as_of_date(as_of_date)
 
 
+def _context_key(symbol: str) -> tuple[str, str]:
+    return _cache_day(), normalize_symbol(symbol)
+
+
 def _prune_cache_locked() -> None:
     if len(_payload_cache) <= _MAX_CACHE_ENTRIES:
-        return
-    ordered = sorted(
-        _payload_cache.items(),
-        key=lambda item: item[1].get("loaded_at", 0.0),
-    )
-    for key, _ in ordered[: len(_payload_cache) - _MAX_CACHE_ENTRIES]:
+        payload_keys_to_prune = []
+    else:
+        ordered = sorted(
+            _payload_cache.items(),
+            key=lambda item: item[1].get("loaded_at", 0.0),
+        )
+        payload_keys_to_prune = [key for key, _ in ordered[: len(_payload_cache) - _MAX_CACHE_ENTRIES]]
+
+    for key in payload_keys_to_prune:
         _payload_cache.pop(key, None)
         _failure_retry_after.pop(key, None)
         _interactive_failure_retry_after.pop(key, None)
         _alert_preload_queued.discard(key)
     _alert_preload_queue[:] = [key for key in _alert_preload_queue if key in _alert_preload_queued]
+
+    if len(_context_cache) <= _MAX_CACHE_ENTRIES:
+        return
+    ordered_contexts = sorted(
+        _context_cache.items(),
+        key=lambda item: item[1].get("loaded_at", 0.0),
+    )
+    for key, _ in ordered_contexts[: len(_context_cache) - _MAX_CACHE_ENTRIES]:
+        _context_cache.pop(key, None)
 
 
 def _normalize_symbols(symbols: Iterable[str] | None) -> list[str]:
@@ -209,9 +225,37 @@ def get_preloaded_entry_decision(
         exact_payload = _copy_cached_payload_locked(_cache_key(normalized, as_of_date), full_only=full_only)
         if exact_payload is not None:
             return exact_payload
-        if as_of_date:
-            return None
-        return _copy_cached_payload_locked(_cache_key(normalized, _cache_day()), full_only=full_only)
+        cached_context = _context_cache.get(_context_key(normalized))
+        context = cached_context.get("context") if isinstance(cached_context, dict) else None
+        if context is None and not as_of_date:
+            latest_payload = _copy_cached_payload_locked(_cache_key(normalized, _cache_day()), full_only=full_only)
+            if latest_payload is not None:
+                return latest_payload
+
+    if context is None:
+        return None
+
+    payload = convert_to_python_types(
+        build_entry_decision_from_context(
+            context,
+            as_of_date=as_of_date,
+        )
+    )
+    store_preloaded_entry_decision(normalized, payload, as_of_date=as_of_date)
+    return payload
+
+
+def store_entry_decision_context(symbol: str, context: dict) -> bool:
+    normalized = normalize_symbol(symbol)
+    if not normalized or not isinstance(context, dict):
+        return False
+    with _state_lock:
+        _context_cache[_context_key(normalized)] = {
+            "context": context,
+            "loaded_at": time.time(),
+        }
+        _prune_cache_locked()
+    return True
 
 
 def store_preloaded_entry_decision(
@@ -253,6 +297,8 @@ def _symbols_needing_preload(
             key = _cache_key(symbol, preload_date)
             if _failure_retry_after.get(key, 0.0) > now:
                 continue
+            if _context_cache.get(_context_key(symbol)) is not None:
+                continue
             cached = _payload_cache.get(key)
             if cached is None:
                 pending.append(symbol)
@@ -269,6 +315,8 @@ def _key_needs_full_preload_locked(key: tuple[str, str, str], now: float | None 
     now = time.time() if now is None else now
     if _failure_retry_after.get(key, 0.0) > now:
         return False
+    if _context_cache.get((cache_day, _symbol)) is not None:
+        return False
     cached = _payload_cache.get(key)
     if cached is None:
         return True
@@ -276,10 +324,9 @@ def _key_needs_full_preload_locked(key: tuple[str, str, str], now: float | None 
 
 
 def _running_worker_keys_locked() -> set[tuple[str, str, str]]:
-    keys = set(_alert_worker_processes.keys())
-    if _worker_process is not None:
-        keys.update(_cache_key(symbol, _worker_as_of_date) for symbol in _worker_symbols)
-    return keys
+    if _worker_process is None:
+        return set()
+    return {_cache_key(symbol, _worker_as_of_date) for symbol in _worker_symbols}
 
 
 def _running_worker_can_satisfy_interactive_request(
@@ -380,8 +427,8 @@ def _start_next_queued_alert_preload(max_symbols: int | None = None) -> dict | N
     batch_symbols, as_of_date = batch
 
     if os.getenv("ENTRY_DECISION_PRELOAD_INLINE", "").strip() == "1":
-        loaded_payloads, failed = _compute_interactive_payloads(batch_symbols, as_of_date)
-        return _store_worker_results(loaded_payloads, failed, as_of_date, source="alert")
+        loaded_payloads, contexts, failed = _compute_interactive_artifacts(batch_symbols, as_of_date)
+        return _store_worker_results(loaded_payloads, failed, as_of_date, source="alert", contexts=contexts)
 
     try:
         _start_preload_worker(batch_symbols, as_of_date, source="alert")
@@ -397,185 +444,6 @@ def _start_next_queued_alert_preload(max_symbols: int | None = None) -> dict | N
             "retry_after_seconds": DEFAULT_FAILURE_BACKOFF_SECONDS,
         }
     return {"status": "started", "symbols": batch_symbols, "source": "alert"}
-
-
-def _start_alert_worker(symbol: str, as_of_date: str) -> None:
-    key = _cache_key(symbol, as_of_date)
-    if key in _alert_worker_processes:
-        return
-
-    result_file = tempfile.NamedTemporaryFile(
-        prefix="entry_decision_alert_preload_",
-        suffix=".pickle",
-        delete=False,
-    )
-    result_path = result_file.name
-    result_file.close()
-
-    ctx = multiprocessing.get_context(os.getenv("ENTRY_DECISION_PRELOAD_MP_CONTEXT", "spawn"))
-    process = ctx.Process(
-        target=_child_compute_preload_payloads,
-        args=(result_path, [symbol], as_of_date, "alert"),
-    )
-    process.daemon = True
-    process.start()
-
-    _alert_worker_processes[key] = {
-        "process": process,
-        "result_path": result_path,
-        "started_at": time.monotonic(),
-        "symbol": symbol,
-        "as_of_date": as_of_date,
-    }
-
-
-def _terminate_alert_worker(key: tuple[str, str, str]) -> None:
-    state = _alert_worker_processes.pop(key, None)
-    if not state:
-        return
-    process = state.get("process")
-    if process is not None and process.is_alive():
-        process.terminate()
-        process.join(timeout=1)
-        if process.is_alive():  # pragma: no cover - platform defensive guard
-            process.kill()
-            process.join(timeout=1)
-    elif process is not None:
-        process.join(timeout=1)
-    _cleanup_worker_file(state.get("result_path"))
-
-
-def _reap_alert_workers(timeout_seconds: float) -> dict | None:
-    if not _alert_worker_processes:
-        return None
-
-    loaded_symbols: list[str] = []
-    failed_symbols: dict[str, str] = {}
-    timed_out_symbols: list[str] = []
-    running_symbols: list[str] = []
-
-    for key, state in list(_alert_worker_processes.items()):
-        process = state["process"]
-        symbol = state["symbol"]
-        as_of_date = state["as_of_date"]
-        elapsed = time.monotonic() - state["started_at"]
-
-        if process.is_alive():
-            if elapsed < timeout_seconds:
-                running_symbols.append(symbol)
-                continue
-            _terminate_alert_worker(key)
-            _mark_preload_failed(symbol, as_of_date=as_of_date)
-            timed_out_symbols.append(symbol)
-            continue
-
-        process.join(timeout=1)
-        result_path = state.get("result_path")
-        try:
-            if not result_path or not os.path.exists(result_path) or os.path.getsize(result_path) <= 0:
-                failed = {symbol: f"worker exited with code {process.exitcode}"}
-                result = _store_worker_results({}, failed, as_of_date, source="alert")
-            else:
-                with open(result_path, "rb") as handle:
-                    loaded_payloads, failed = pickle.load(handle)
-                result = _store_worker_results(loaded_payloads, failed, as_of_date, source="alert")
-        finally:
-            _cleanup_worker_file(result_path)
-            _alert_worker_processes.pop(key, None)
-
-        loaded_symbols.extend(result.get("symbols", []))
-        failed_symbols.update(result.get("failed", {}))
-
-    if loaded_symbols:
-        return {
-            "status": "loaded",
-            "source": "alert",
-            "loaded": len(loaded_symbols),
-            "symbols": loaded_symbols,
-            "failed": failed_symbols,
-            "running_symbols": running_symbols,
-            "timed_out_symbols": timed_out_symbols,
-        }
-    if failed_symbols or timed_out_symbols:
-        return {
-            "status": "error",
-            "source": "alert",
-            "loaded": 0,
-            "failed": failed_symbols,
-            "timed_out_symbols": timed_out_symbols,
-            "running_symbols": running_symbols,
-        }
-    if running_symbols:
-        return {"status": "running", "source": "alert", "symbols": running_symbols}
-    return None
-
-
-def _alert_worker_running_for_symbol(symbol: str, as_of_date: str) -> bool:
-    return _cache_key(symbol, as_of_date) in _alert_worker_processes
-
-
-def _start_queued_alert_workers(max_symbols: int | None = None) -> dict | None:
-    capacity = max(0, DEFAULT_ALERT_WORKER_CONCURRENCY - len(_alert_worker_processes))
-    if max_symbols is not None:
-        capacity = min(capacity, max(0, max_symbols))
-    if capacity <= 0:
-        if _alert_worker_processes:
-            return {
-                "status": "running",
-                "source": "alert",
-                "symbols": [state["symbol"] for state in _alert_worker_processes.values()],
-            }
-        return None
-
-    started: list[str] = []
-    loaded: list[str] = []
-    failed: dict[str, str] = {}
-
-    for _ in range(capacity):
-        batch = _next_queued_alert_batch(max_symbols=1)
-        if batch is None:
-            break
-        batch_symbols, as_of_date = batch
-        symbol = batch_symbols[0]
-        if os.getenv("ENTRY_DECISION_PRELOAD_INLINE", "").strip() == "1":
-            loaded_payloads, worker_failed = _compute_interactive_payloads([symbol], as_of_date)
-            result = _store_worker_results(loaded_payloads, worker_failed, as_of_date, source="alert")
-            loaded.extend(result.get("symbols", []))
-            failed.update(result.get("failed", {}))
-            continue
-        try:
-            _start_alert_worker(symbol, as_of_date)
-            started.append(symbol)
-        except Exception as exc:
-            _mark_preload_failed(symbol, as_of_date=as_of_date)
-            failed[symbol] = str(exc)
-            logger.exception("Entry decision alert worker failed to start for %s", symbol)
-
-    if started:
-        return {
-            "status": "started",
-            "source": "alert",
-            "symbols": started,
-            "running_symbols": [state["symbol"] for state in _alert_worker_processes.values()],
-            "failed": failed,
-        }
-    if loaded:
-        return {
-            "status": "loaded",
-            "source": "alert",
-            "loaded": len(loaded),
-            "symbols": loaded,
-            "failed": failed,
-        }
-    if failed:
-        return {"status": "error", "source": "alert", "loaded": 0, "failed": failed}
-    if _alert_worker_processes:
-        return {
-            "status": "running",
-            "source": "alert",
-            "symbols": [state["symbol"] for state in _alert_worker_processes.values()],
-        }
-    return None
 
 
 def _mark_preload_failed(symbol: str, as_of_date: str | None = None) -> None:
@@ -636,18 +504,22 @@ def _download_symbol_list(symbols: Iterable[str]) -> list[str]:
     return out
 
 
-def _compute_preload_payloads(symbols: list[str], as_of_date: str) -> tuple[dict[str, dict], dict[str, str]]:
+def _compute_preload_artifacts(
+    symbols: list[str],
+    as_of_date: str,
+) -> tuple[dict[str, dict], dict[str, dict], dict[str, str]]:
     """
-    Build preload payloads from one batched OHLC download.
+    Build preload payloads and reusable model contexts from one batched OHLC download.
 
     This deliberately avoids the request path's single-ticker history fallback and
     earnings-date lookup. Those Yahoo calls are where crumb failures tend to hang.
     """
     loaded: dict[str, dict] = {}
+    contexts: dict[str, dict] = {}
     failed: dict[str, str] = {}
     download_symbols = _download_symbol_list(symbols)
     if not download_symbols:
-        return loaded, failed
+        return loaded, contexts, failed
 
     try:
         data_dict = prepare_stock_data(
@@ -660,12 +532,12 @@ def _compute_preload_payloads(symbols: list[str], as_of_date: str) -> tuple[dict
     except Exception as exc:
         failed = {symbol: str(exc) for symbol in symbols}
         failed["__global__"] = str(exc)
-        return loaded, failed
+        return loaded, contexts, failed
 
     if not any(_is_valid_price_frame(data_dict.get(symbol)) for symbol in download_symbols):
         failed = {symbol: "Preload price download returned no usable frames." for symbol in symbols}
         failed["__global__"] = "Preload price download returned no usable frames."
-        return loaded, failed
+        return loaded, contexts, failed
 
     context_frames = {
         context_symbol: data_dict.get(context_symbol)
@@ -687,32 +559,50 @@ def _compute_preload_payloads(symbols: list[str], as_of_date: str) -> tuple[dict
             continue
 
         try:
-            payload = build_entry_decision_from_frame(
+            context = build_entry_decision_context_from_frame(
                 symbol,
                 frame,
-                as_of_date=as_of_date,
                 earnings_dates=set(),
                 earnings_symbol=resolved_symbol or symbol,
                 context_frames=context_frames,
             )
+            payload = build_entry_decision_from_context(context, as_of_date=as_of_date)
             loaded[symbol] = convert_to_python_types(payload)
+            contexts[symbol] = context
         except Exception as exc:
             failed[symbol] = str(exc)
+    return loaded, contexts, failed
+
+
+def _compute_preload_payloads(symbols: list[str], as_of_date: str) -> tuple[dict[str, dict], dict[str, str]]:
+    loaded, _contexts, failed = _compute_preload_artifacts(symbols, as_of_date)
     return loaded, failed
 
 
-def _compute_interactive_payloads(symbols: list[str], as_of_date: str) -> tuple[dict[str, dict], dict[str, str]]:
+def _compute_interactive_artifacts(
+    symbols: list[str],
+    as_of_date: str,
+) -> tuple[dict[str, dict], dict[str, dict], dict[str, str]]:
     """
-    Build user-requested payloads through the same robust loader as the old
-    synchronous route, but inside the worker process.
+    Build user-requested payloads and contexts through the robust loader, but
+    inside the worker process.
     """
     loaded: dict[str, dict] = {}
+    contexts: dict[str, dict] = {}
     failed: dict[str, str] = {}
     for symbol in symbols:
         try:
-            loaded[symbol] = convert_to_python_types(get_entry_decision(symbol, as_of_date=as_of_date))
+            context = get_entry_decision_context(symbol)
+            payload = build_entry_decision_from_context(context, as_of_date=as_of_date)
+            loaded[symbol] = convert_to_python_types(payload)
+            contexts[symbol] = context
         except Exception as exc:
             failed[symbol] = str(exc)
+    return loaded, contexts, failed
+
+
+def _compute_interactive_payloads(symbols: list[str], as_of_date: str) -> tuple[dict[str, dict], dict[str, str]]:
+    loaded, _contexts, failed = _compute_interactive_artifacts(symbols, as_of_date)
     return loaded, failed
 
 
@@ -724,15 +614,16 @@ def _child_compute_preload_payloads(result_path: str, symbols: list[str], as_of_
     ):
         try:
             if source in ("interactive", "alert"):
-                loaded, failed = _compute_interactive_payloads(symbols, as_of_date)
+                loaded, contexts, failed = _compute_interactive_artifacts(symbols, as_of_date)
             else:
-                loaded, failed = _compute_preload_payloads(symbols, as_of_date)
+                loaded, contexts, failed = _compute_preload_artifacts(symbols, as_of_date)
         except Exception as exc:  # pragma: no cover - defensive child-process guard
             loaded = {}
+            contexts = {}
             failed = {symbol: str(exc) for symbol in symbols}
             failed["__global__"] = str(exc)
     with open(result_path, "wb") as handle:
-        pickle.dump((loaded, failed), handle, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump((loaded, contexts, failed), handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def _cleanup_worker_file(path: str | None) -> None:
@@ -800,8 +691,12 @@ def _store_worker_results(
     as_of_date: str,
     *,
     source: str,
+    contexts: dict[str, dict] | None = None,
 ) -> dict:
     loaded: list[str] = []
+    for symbol, context in (contexts or {}).items():
+        store_entry_decision_context(symbol, context)
+
     for symbol, payload in loaded_payloads.items():
         store_preloaded_entry_decision(symbol, payload, as_of_date=as_of_date)
         loaded.append(symbol)
@@ -870,15 +765,20 @@ def _reap_preload_worker(timeout_seconds: float) -> dict | None:
             failed["__global__"] = f"worker exited with code {process.exitcode}"
             return _store_worker_results({}, failed, as_of_date, source=source)
         with open(result_path, "rb") as handle:
-            loaded_payloads, failed = pickle.load(handle)
-        return _store_worker_results(loaded_payloads, failed, as_of_date, source=source)
+            result = pickle.load(handle)
+        if isinstance(result, tuple) and len(result) == 3:
+            loaded_payloads, contexts, failed = result
+        else:
+            loaded_payloads, failed = result
+            contexts = {}
+        return _store_worker_results(loaded_payloads, failed, as_of_date, source=source, contexts=contexts)
     finally:
         _clear_worker_state()
 
 
 def _run_preload_inline(batch_symbols: list[str], as_of_date: str) -> dict:
-    loaded_payloads, failed = _compute_preload_payloads(batch_symbols, as_of_date)
-    return _store_worker_results(loaded_payloads, failed, as_of_date, source="background")
+    loaded_payloads, contexts, failed = _compute_preload_artifacts(batch_symbols, as_of_date)
+    return _store_worker_results(loaded_payloads, failed, as_of_date, source="background", contexts=contexts)
 
 
 def refresh_entry_decision_preload_state(timeout_seconds: float | None = None) -> dict | None:
@@ -886,9 +786,7 @@ def refresh_entry_decision_preload_state(timeout_seconds: float | None = None) -
     if not _preload_lock.acquire(blocking=False):
         return {"status": "skipped", "reason": "preload_coordinator_busy"}
     try:
-        alert_result = _reap_alert_workers(timeout_seconds)
-        worker_result = _reap_preload_worker(timeout_seconds)
-        return worker_result or alert_result
+        return _reap_preload_worker(timeout_seconds)
     finally:
         _preload_lock.release()
 
@@ -910,17 +808,9 @@ def request_full_entry_decision_preload(
     if not _preload_lock.acquire(blocking=False):
         return {"status": "skipped", "reason": "preload_coordinator_busy"}
     try:
-        alert_worker_result = _reap_alert_workers(DEFAULT_WORKER_TIMEOUT_SECONDS)
         worker_result = _reap_preload_worker(DEFAULT_WORKER_TIMEOUT_SECONDS)
         if get_preloaded_entry_decision(normalized, as_of_date=preload_date, full_only=True) is not None:
-            return {"status": "ready", "symbol": normalized, "worker": worker_result or alert_worker_result}
-        if force and _alert_worker_running_for_symbol(normalized, preload_date):
-            return {
-                "status": "running",
-                "symbol": normalized,
-                "worker": alert_worker_result,
-                "source": "alert",
-            }
+            return {"status": "ready", "symbol": normalized, "worker": worker_result}
         if _worker_process is not None:
             worker_symbols = list(_worker_symbols)
             worker_as_of_date = _worker_as_of_date
@@ -929,7 +819,7 @@ def request_full_entry_decision_preload(
                 return {
                     "status": "running",
                     "symbol": normalized,
-                    "worker": worker_result or alert_worker_result,
+                    "worker": worker_result,
                     "source": worker_source,
                 }
             if force and _running_worker_can_satisfy_interactive_request(
@@ -942,7 +832,7 @@ def request_full_entry_decision_preload(
                 return {
                     "status": "running",
                     "symbol": normalized,
-                    "worker": worker_result or alert_worker_result,
+                    "worker": worker_result,
                     "source": worker_source,
                 }
             symbol_cooldown_remaining = (
@@ -970,7 +860,7 @@ def request_full_entry_decision_preload(
                     "symbol": normalized,
                     "reason": "worker_running",
                     "active_symbols": worker_symbols,
-                    "worker": worker_result or alert_worker_result,
+                    "worker": worker_result,
                     "source": worker_source,
                 }
         symbol_cooldown_remaining = (
@@ -1030,20 +920,17 @@ def preload_entry_decisions_from_latest_alerts(
         return {"status": "skipped", "reason": "preload_coordinator_busy"}
 
     try:
-        alert_worker_result = _reap_alert_workers(timeout_seconds)
         worker_result = _reap_preload_worker(timeout_seconds)
         if isinstance(worker_result, dict) and worker_result.get("status") == "running":
             return worker_result
 
         if not is_backend_idle(min_idle_seconds):
-            if alert_worker_result is not None:
-                return alert_worker_result
             return {"status": "skipped", "reason": "backend_busy"}
 
-        queued_alert_result = _start_queued_alert_workers(max_symbols=max_symbols)
+        queued_alert_result = _start_next_queued_alert_preload(max_symbols=max_symbols)
         if queued_alert_result is not None:
-            if worker_result is not None or alert_worker_result is not None:
-                queued_alert_result["previous_worker"] = worker_result or alert_worker_result
+            if worker_result is not None:
+                queued_alert_result["previous_worker"] = worker_result
             return queued_alert_result
 
         cooldown_remaining = _global_preload_backoff_remaining()
@@ -1064,10 +951,10 @@ def preload_entry_decisions_from_latest_alerts(
             source="background",
             as_of_date=background_as_of_date,
         )
-        if (worker_result is not None or alert_worker_result is not None) and result.get("status") in ("ready", "skipped"):
-            return worker_result or alert_worker_result
-        if worker_result is not None or alert_worker_result is not None:
-            result["previous_worker"] = worker_result or alert_worker_result
+        if worker_result is not None and result.get("status") in ("ready", "skipped"):
+            return worker_result
+        if worker_result is not None:
+            result["previous_worker"] = worker_result
         return result
     finally:
         _preload_lock.release()
@@ -1101,8 +988,8 @@ def _preload_entry_decisions_from_alert_payload_locked(
 
     if os.getenv("ENTRY_DECISION_PRELOAD_INLINE", "").strip() == "1":
         if source == "alert":
-            loaded_payloads, failed = _compute_interactive_payloads(batch_symbols, as_of_date)
-            return _store_worker_results(loaded_payloads, failed, as_of_date, source="alert")
+            loaded_payloads, contexts, failed = _compute_interactive_artifacts(batch_symbols, as_of_date)
+            return _store_worker_results(loaded_payloads, failed, as_of_date, source="alert", contexts=contexts)
         return _run_preload_inline(batch_symbols, as_of_date)
 
     _start_preload_worker(batch_symbols, as_of_date, source=source)
@@ -1120,15 +1007,12 @@ def preload_entry_decisions_from_alert_payload(
         return {"status": "skipped", "reason": "preload_coordinator_busy"}
 
     try:
-        alert_worker_result = _reap_alert_workers(timeout_seconds)
         worker_result = _reap_preload_worker(timeout_seconds)
 
         symbols = alert_symbols_from_payload(alert_payload)
         if not symbols:
             if worker_result is not None:
                 return worker_result
-            if alert_worker_result is not None:
-                return alert_worker_result
             return {"status": "skipped", "reason": "no_alert_symbols", "symbols": []}
 
         if not _full_preload_enabled():
@@ -1144,12 +1028,6 @@ def preload_entry_decisions_from_alert_payload(
             }
 
         if not is_backend_idle(min_idle_seconds):
-            if alert_worker_result is not None:
-                return {
-                    **alert_worker_result,
-                    "queued_symbols": queued_symbols,
-                    "queued_count": len(queued_symbols),
-                }
             return {
                 "status": "skipped",
                 "reason": "backend_busy",
@@ -1157,20 +1035,18 @@ def preload_entry_decisions_from_alert_payload(
                 "queued_count": len(queued_symbols),
             }
 
-        # Keep every visible ticker queued, but start small batches so completed
-        # payloads become visible instead of waiting for a huge worker to finish.
-        result = _start_queued_alert_workers(max_symbols=max_symbols)
+        # User-visible alert tickers are high intent. Keep every visible ticker
+        # queued, then start the next alert batch without blocking this request.
+        result = _start_next_queued_alert_preload(max_symbols=max_symbols)
         if result is not None:
             result["queued_symbols"] = queued_symbols
             result["queued_count"] = len(queued_symbols)
-            if worker_result is not None or alert_worker_result is not None:
-                result["previous_worker"] = worker_result or alert_worker_result
+            if worker_result is not None:
+                result["previous_worker"] = worker_result
             return result
 
         if worker_result is not None:
             return worker_result
-        if alert_worker_result is not None:
-            return alert_worker_result
         return {"status": "ready", "loaded": 0, "symbols": symbols}
     finally:
         _preload_lock.release()
@@ -1179,13 +1055,12 @@ def preload_entry_decisions_from_alert_payload(
 def _reset_entry_decision_preload_state_for_tests() -> None:
     global _active_requests, _last_request_activity_at, _global_retry_after
     _terminate_worker()
-    for key in list(_alert_worker_processes):
-        _terminate_alert_worker(key)
     with _state_lock:
         _active_requests = 0
         _last_request_activity_at = 0.0
         _global_retry_after = 0.0
         _payload_cache.clear()
+        _context_cache.clear()
         _failure_retry_after.clear()
         _interactive_failure_retry_after.clear()
         _alert_preload_queue.clear()
