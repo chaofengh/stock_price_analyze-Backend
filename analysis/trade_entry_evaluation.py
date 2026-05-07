@@ -2171,10 +2171,148 @@ def _empty_backtest_result(feature_df: pd.DataFrame, horizon: int, period_start:
         "missed_reversal_count": 0,
         "flat_count": 0,
         "incomplete_future_count": 0,
+        "win_count": 0,
+        "loss_count": 0,
+        "win_rate": None,
+        "expected_return": None,
+        "expected_downside": None,
+        "average_win_return": None,
+        "average_loss_return": None,
+        "expected_atr_return": None,
+        "expected_atr_downside": None,
+        "average_atr_win": None,
+        "average_atr_loss": None,
+        "atr_reward_risk": None,
+        "confidence_buckets": [],
         "signal_tier_counts": {},
         "predictions": [],
         "recent_predictions": [],
     }
+
+
+def _prediction_trade_sign(touched_side: str | None, predicted_direction: str | None) -> float:
+    side_sign = _side_sign(touched_side)
+    if abs(side_sign) <= _EPS or predicted_direction not in ("continuation", "reversal"):
+        return 0.0
+    return side_sign if predicted_direction == "continuation" else -side_sign
+
+
+def _prediction_return_values(
+    touched_side: str | None,
+    predicted_direction: str | None,
+    signal_close: float,
+    outcome_close: float,
+    atr: float,
+) -> dict:
+    trade_sign = _prediction_trade_sign(touched_side, predicted_direction)
+    if abs(trade_sign) <= _EPS or not np.isfinite(signal_close) or signal_close <= 0 or not np.isfinite(outcome_close):
+        return {
+            "trade_direction": None,
+            "trade_return": None,
+            "trade_return_atr": None,
+        }
+
+    price_delta = outcome_close - signal_close
+    trade_return = trade_sign * (price_delta / signal_close)
+    trade_return_atr = None
+    if np.isfinite(atr) and atr > 0:
+        trade_return_atr = trade_sign * (price_delta / atr)
+    return {
+        "trade_direction": "long" if trade_sign > 0 else "short",
+        "trade_return": round(float(trade_return), 6),
+        "trade_return_atr": round(float(trade_return_atr), 6) if trade_return_atr is not None else None,
+    }
+
+
+def _mean_or_none(values: list[float]) -> float | None:
+    valid = [float(value) for value in values if np.isfinite(value)]
+    if not valid:
+        return None
+    return float(np.mean(valid))
+
+
+def _round_metric(value: float | None) -> float | None:
+    if value is None or not np.isfinite(value):
+        return None
+    return round(float(value), 6)
+
+
+def _return_metrics_for_predictions(predictions: list[dict]) -> dict:
+    returns = [
+        _safe_num(item.get("trade_return"), np.nan)
+        for item in predictions
+        if np.isfinite(_safe_num(item.get("trade_return"), np.nan))
+    ]
+    atr_returns = [
+        _safe_num(item.get("trade_return_atr"), np.nan)
+        for item in predictions
+        if np.isfinite(_safe_num(item.get("trade_return_atr"), np.nan))
+    ]
+    wins = [value for value in returns if value > 0]
+    losses = [value for value in returns if value < 0]
+    atr_wins = [value for value in atr_returns if value > 0]
+    atr_losses = [value for value in atr_returns if value < 0]
+
+    average_atr_win = _mean_or_none(atr_wins)
+    average_atr_loss = _mean_or_none(atr_losses)
+    atr_reward_risk = None
+    if average_atr_win is not None and average_atr_loss is not None and abs(average_atr_loss) > _EPS:
+        atr_reward_risk = average_atr_win / abs(average_atr_loss)
+
+    return {
+        "win_count": len(wins),
+        "loss_count": len(losses),
+        "win_rate": round(len(wins) / len(returns), 6) if returns else None,
+        "expected_return": _round_metric(_mean_or_none(returns)),
+        "expected_downside": _round_metric(_mean_or_none(losses) if losses else (0.0 if returns else None)),
+        "average_win_return": _round_metric(_mean_or_none(wins) if wins else (0.0 if returns else None)),
+        "average_loss_return": _round_metric(_mean_or_none(losses) if losses else (0.0 if returns else None)),
+        "expected_atr_return": _round_metric(_mean_or_none(atr_returns)),
+        "expected_atr_downside": _round_metric(_mean_or_none(atr_losses) if atr_losses else (0.0 if atr_returns else None)),
+        "average_atr_win": _round_metric(average_atr_win if atr_wins else (0.0 if atr_returns else None)),
+        "average_atr_loss": _round_metric(average_atr_loss if atr_losses else (0.0 if atr_returns else None)),
+        "atr_reward_risk": _round_metric(atr_reward_risk),
+    }
+
+
+def _confidence_bucket_label(confidence_score: Any) -> tuple[int, str] | None:
+    score = _safe_num(confidence_score, np.nan)
+    if not np.isfinite(score):
+        return None
+    score_int = int(max(0, min(100, round(score))))
+    if score_int >= 100:
+        return 100, "100"
+    lower = max(0, min(90, (score_int // 10) * 10))
+    return lower, f"{lower}-{lower + 9}"
+
+
+def _confidence_bucket_metrics(predictions: list[dict]) -> list[dict]:
+    grouped: dict[int, dict] = {}
+    for item in predictions:
+        bucket = _confidence_bucket_label(item.get("confidence_score"))
+        if bucket is None:
+            continue
+        bucket_floor, label = bucket
+        group = grouped.setdefault(bucket_floor, {"bucket": label, "predictions": []})
+        group["predictions"].append(item)
+
+    out: list[dict] = []
+    for bucket_floor in sorted(grouped):
+        rows = grouped[bucket_floor]["predictions"]
+        correct_count = sum(1 for item in rows if item.get("is_correct"))
+        prediction_count = len(rows)
+        metrics = _return_metrics_for_predictions(rows)
+        out.append(
+            {
+                "bucket": grouped[bucket_floor]["bucket"],
+                "bucket_floor": bucket_floor,
+                "prediction_count": prediction_count,
+                "correct_count": correct_count,
+                "accuracy": round(correct_count / prediction_count, 6) if prediction_count else None,
+                **metrics,
+            }
+        )
+    return out
 
 
 def _run_horizon_backtest(
@@ -2226,6 +2364,7 @@ def _run_horizon_backtest(
         signal_close = _safe_num(row.get("close"), np.nan)
         outcome_row = feature_df.iloc[idx + horizon]
         outcome_close = _safe_num(outcome_row.get("close"), np.nan)
+        atr = _safe_num(row.get("ATR14"), np.nan)
         if not np.isfinite(signal_close) or not np.isfinite(outcome_close):
             incomplete_future_count += 1
             continue
@@ -2277,6 +2416,13 @@ def _run_horizon_backtest(
         if signal_tier:
             signal_tier_counts[str(signal_tier)] = signal_tier_counts.get(str(signal_tier), 0) + 1
 
+        return_values = _prediction_return_values(
+            touched_side,
+            predicted_direction,
+            signal_close,
+            outcome_close,
+            atr,
+        )
         predictions.append(
             {
                 "signal_date": _to_date_string(row.get("date")),
@@ -2289,6 +2435,7 @@ def _run_horizon_backtest(
                 "outcome_close": round(outcome_close, 6),
                 "continuation_hurdle": round(continuation_hurdle, 6),
                 "is_correct": bool(is_correct),
+                **return_values,
                 "continuation_probability": horizon_decision.get("continuation_probability"),
                 "reversal_probability": horizon_decision.get("reversal_probability"),
                 "confidence_score": horizon_decision.get("confidence_score"),
@@ -2310,6 +2457,7 @@ def _run_horizon_backtest(
         else None
     )
     reversal_accuracy = reversal_correct_count / reversal_call_count if reversal_call_count > 0 else None
+    return_metrics = _return_metrics_for_predictions(predictions)
 
     return {
         "horizon_days": horizon,
@@ -2331,6 +2479,8 @@ def _run_horizon_backtest(
         "missed_reversal_count": missed_reversal_count,
         "flat_count": flat_count,
         "incomplete_future_count": incomplete_future_count,
+        **return_metrics,
+        "confidence_buckets": _confidence_bucket_metrics(predictions),
         "signal_tier_counts": signal_tier_counts,
         "predictions": predictions,
         "recent_predictions": list(reversed(predictions[-20:])),
@@ -2588,6 +2738,7 @@ def _prediction_book_metrics(predictions: list[dict]) -> dict:
         "continuation_accuracy": continuation_correct / len(continuation) if continuation else None,
         "reversal_call_count": len(reversal),
         "reversal_accuracy": reversal_correct / len(reversal) if reversal else None,
+        **_return_metrics_for_predictions(predictions),
     }
 
 
@@ -2651,6 +2802,8 @@ def _candidate_selection_key(candidates: list[dict], metrics: dict) -> tuple:
         _safe_num(metrics.get("accuracy"), -1.0),
         _safe_num(metrics.get("reversal_accuracy"), -1.0),
         _safe_num(metrics.get("continuation_accuracy"), -1.0),
+        _safe_num(metrics.get("expected_return"), -999.0),
+        _safe_num(metrics.get("atr_reward_risk"), -1.0),
         sum(1 for candidate in candidates if candidate["gate"].get("direction") == "reversal"),
     )
 
@@ -2659,6 +2812,8 @@ def _candidate_priority_key(candidate: dict) -> tuple:
     return (
         int(_safe_num(candidate["metrics"].get("prediction_count"), 0)),
         _safe_num(candidate["metrics"].get("accuracy"), 0.0),
+        _safe_num(candidate["metrics"].get("expected_return"), -999.0),
+        _safe_num(candidate["metrics"].get("atr_reward_risk"), -1.0),
         1 if candidate["gate"].get("direction") == "reversal" else 0,
     )
 
@@ -2824,17 +2979,31 @@ def _coverage_repair_prediction_row(
     policy: dict,
 ) -> dict:
     row = feature_df.iloc[idx]
+    signal_close = _safe_num(row.get("close"), np.nan)
+    outcome_row = feature_df.iloc[idx + horizon]
+    outcome_close = _safe_num(outcome_row.get("close"), np.nan)
+    atr = _safe_num(row.get("ATR14"), np.nan)
+    return_values = _prediction_return_values(
+        row.get("touched_side"),
+        direction,
+        signal_close,
+        outcome_close,
+        atr,
+    )
     return {
         "_repair_row_key": (int(idx), horizon),
         "_repair_policy": policy,
         "signal_date": _to_date_string(row.get("date")),
-        "outcome_date": _to_date_string(feature_df.iloc[idx + horizon].get("date")),
+        "outcome_date": _to_date_string(outcome_row.get("date")),
         "horizon_days": horizon,
         "touched_side": row.get("touched_side"),
         "predicted_direction": direction,
         "actual_direction": actual_direction,
         "confidence_score": int(round(_safe_num(policy.get("precision"), 0.0) * 100.0)),
         "is_correct": direction == actual_direction,
+        "signal_close": round(signal_close, 6) if np.isfinite(signal_close) else None,
+        "outcome_close": round(outcome_close, 6) if np.isfinite(outcome_close) else None,
+        **return_values,
         "signal_model": "Selective Coverage Repair",
         "signal_model_id": policy["id"],
         "signal_precision": policy["precision"],
@@ -3177,6 +3346,12 @@ def _finalize_deployment_quality(
         result["raw_accuracy"] = raw_result.get("accuracy")
         result["raw_reverse_accuracy"] = raw_result.get("reversal_accuracy")
         result["raw_continue_accuracy"] = raw_result.get("continuation_accuracy")
+        result["raw_win_rate"] = raw_result.get("win_rate")
+        result["raw_expected_return"] = raw_result.get("expected_return")
+        result["raw_expected_downside"] = raw_result.get("expected_downside")
+        result["raw_expected_atr_return"] = raw_result.get("expected_atr_return")
+        result["raw_expected_atr_downside"] = raw_result.get("expected_atr_downside")
+        result["raw_atr_reward_risk"] = raw_result.get("atr_reward_risk")
         result["coverage_policy"] = raw_result.get("coverage_policy", _COVERAGE_POLICY_MAX_SAFE)
         result["max_safe_prediction_count"] = result.get("prediction_count")
         result["max_safe_coverage"] = result.get("coverage")
@@ -3407,7 +3582,7 @@ def _adaptive_raw_profile_prediction(
     )
 
     neighbors = []
-    for idx, label, distance in zip(neighbor_idx[:8], neighbor_labels[:8], neighbor_distances[:8], strict=False):
+    for idx, label, distance in zip(neighbor_idx[:8], neighbor_labels[:8], neighbor_distances[:8]):
         neighbors.append(
             {
                 "date": _to_date_string(feature_df.iloc[int(idx)].get("date")),
@@ -4654,6 +4829,225 @@ def _build_entry_chart_data(feature_df: pd.DataFrame) -> list[dict]:
     return out
 
 
+def _feature_frame_through_index(feature_df: pd.DataFrame, resolved_idx: int) -> pd.DataFrame:
+    scoped = feature_df.iloc[: resolved_idx + 1].copy().reset_index(drop=True)
+    attrs = dict(feature_df.attrs)
+    attrs.pop("_adaptive_analog_state", None)
+    scoped.attrs = attrs
+    return scoped
+
+
+def _ensure_decision_for_index(
+    feature_df: pd.DataFrame,
+    decisions_by_index: dict[int, dict],
+    backtest_1y: dict,
+    idx: int,
+    *,
+    force_prediction: bool = False,
+) -> dict:
+    if idx not in decisions_by_index:
+        decisions_by_index[idx] = evaluate_row_decision(
+            feature_df.iloc[idx],
+            feature_df=feature_df,
+            row_index=idx,
+            force_prediction=force_prediction,
+        )
+        direction_gates = {
+            horizon_key: result.get("direction_quality_gate", {})
+            for horizon_key, result in backtest_1y.items()
+            if isinstance(result, dict)
+        }
+        _apply_direction_quality_gates_to_decision(decisions_by_index[idx], direction_gates)
+        _apply_coverage_repair_policies(
+            feature_df,
+            {idx: decisions_by_index[idx]},
+            _coverage_repair_policies_by_horizon(backtest_1y),
+        )
+    return decisions_by_index[idx]
+
+
+def _finalized_point_in_time_context(
+    feature_df: pd.DataFrame,
+    *,
+    force_latest_prediction: bool = False,
+) -> tuple[dict[int, dict], dict]:
+    decisions_by_index: dict[int, dict] = {}
+    decisions_by_index, backtest_1y = _finalize_deployment_quality(feature_df, decisions_by_index)
+    latest_idx = len(feature_df) - 1
+    _ensure_decision_for_index(
+        feature_df,
+        decisions_by_index,
+        backtest_1y,
+        latest_idx,
+        force_prediction=force_latest_prediction,
+    )
+    return decisions_by_index, backtest_1y
+
+
+def _point_in_time_context_for_index(
+    feature_df: pd.DataFrame,
+    idx: int,
+    *,
+    point_in_time_cache: dict[int, dict] | None = None,
+) -> tuple[pd.DataFrame, dict[int, dict], dict]:
+    scoped = _feature_frame_through_index(feature_df, idx)
+    cached = point_in_time_cache.get(idx) if point_in_time_cache is not None else None
+    if isinstance(cached, dict):
+        cached_decisions = cached.get("decisions_by_index")
+        cached_backtest = cached.get("backtest_1y")
+        if isinstance(cached_decisions, dict) and isinstance(cached_backtest, dict):
+            return scoped, deepcopy(cached_decisions), deepcopy(cached_backtest)
+
+    decisions_by_index, backtest_1y = _finalized_point_in_time_context(scoped)
+    if point_in_time_cache is not None:
+        point_in_time_cache[idx] = {
+            "decisions_by_index": deepcopy(decisions_by_index),
+            "backtest_1y": deepcopy(backtest_1y),
+        }
+    return scoped, decisions_by_index, backtest_1y
+
+
+def _point_in_time_decision_for_index(
+    feature_df: pd.DataFrame,
+    idx: int,
+    *,
+    cache: dict[int, dict] | None = None,
+    point_in_time_cache: dict[int, dict] | None = None,
+) -> dict:
+    if cache is not None and idx in cache:
+        return cache[idx]
+
+    scoped, decisions_by_index, _backtest_1y = _point_in_time_context_for_index(
+        feature_df,
+        idx,
+        point_in_time_cache=point_in_time_cache,
+    )
+    decision = deepcopy(decisions_by_index[len(scoped) - 1])
+    if cache is not None:
+        cache[idx] = decision
+    return decision
+
+
+def _open_prediction_row(
+    feature_df: pd.DataFrame,
+    idx: int,
+    horizon: int,
+    horizon_decision: dict,
+) -> dict:
+    row = feature_df.iloc[idx]
+    signal_close = _safe_num(row.get("close"), np.nan)
+    atr = _safe_num(row.get("ATR14"), np.nan)
+    playbook = horizon_decision.get("playbook") or {}
+    return {
+        "status": "open",
+        "signal_date": _to_date_string(row.get("date")),
+        "outcome_date": None,
+        "horizon_days": horizon,
+        "touched_side": row.get("touched_side"),
+        "predicted_direction": horizon_decision.get("predicted_direction"),
+        "actual_direction": None,
+        "signal_close": round(signal_close, 6) if np.isfinite(signal_close) else None,
+        "outcome_close": None,
+        "continuation_hurdle": round(_continuation_hurdle_for_row(row), 6),
+        "is_correct": None,
+        "trade_direction": _prediction_return_values(
+            row.get("touched_side"),
+            horizon_decision.get("predicted_direction"),
+            signal_close,
+            signal_close,
+            atr,
+        ).get("trade_direction"),
+        "trade_return": None,
+        "trade_return_atr": None,
+        "continuation_probability": horizon_decision.get("continuation_probability"),
+        "reversal_probability": horizon_decision.get("reversal_probability"),
+        "confidence_score": horizon_decision.get("confidence_score"),
+        "signal_model": playbook.get("name"),
+        "signal_model_id": playbook.get("id") or (playbook.get("profile") or {}).get("id"),
+        "signal_precision": playbook.get("precision"),
+        "signal_tier": playbook.get("tier") or (playbook.get("profile") or {}).get("tier"),
+    }
+
+
+def _build_open_predictions_by_horizon(
+    feature_df: pd.DataFrame,
+    *,
+    selected_idx: int,
+    selected_decision: dict,
+    point_in_time_cache: dict[int, dict] | None = None,
+) -> dict[str, list[dict]]:
+    open_by_horizon = {f"{horizon}d": [] for horizon in _HORIZONS}
+    if feature_df.empty:
+        return open_by_horizon
+
+    last_date = pd.Timestamp(feature_df.iloc[-1].get("date")).normalize()
+    period_start = max(
+        pd.Timestamp(feature_df.iloc[0].get("date")).normalize(),
+        last_date - pd.DateOffset(days=_BACKTEST_LOOKBACK_DAYS),
+    )
+    first_open_idx = max(0, len(feature_df) - max(_HORIZONS))
+    decision_cache: dict[int, dict] = {}
+
+    for idx in range(first_open_idx, len(feature_df)):
+        row = feature_df.iloc[idx]
+        signal_date = pd.Timestamp(row.get("date")).normalize()
+        if signal_date < period_start:
+            continue
+        if _safe_bool(row.get("event_risk_blocked")):
+            continue
+        if row.get("touched_side") not in ("Upper", "Lower"):
+            continue
+
+        decision = (
+            selected_decision
+            if idx == selected_idx
+            else _point_in_time_decision_for_index(
+                feature_df,
+                idx,
+                cache=decision_cache,
+                point_in_time_cache=point_in_time_cache,
+            )
+        )
+        for horizon in _HORIZONS:
+            if idx + horizon < len(feature_df):
+                continue
+            horizon_key = f"{horizon}d"
+            horizon_decision = decision.get("horizons", {}).get(horizon_key) or {}
+            if horizon_decision.get("status") != "prediction":
+                continue
+            open_by_horizon[horizon_key].append(
+                _open_prediction_row(feature_df, idx, horizon, horizon_decision)
+            )
+
+    return open_by_horizon
+
+
+def _attach_open_predictions_to_backtest(
+    backtest_1y: dict,
+    feature_df: pd.DataFrame,
+    *,
+    selected_idx: int,
+    selected_decision: dict,
+    point_in_time_cache: dict[int, dict] | None = None,
+) -> dict:
+    out = deepcopy(backtest_1y)
+    open_by_horizon = _build_open_predictions_by_horizon(
+        feature_df,
+        selected_idx=selected_idx,
+        selected_decision=selected_decision,
+        point_in_time_cache=point_in_time_cache,
+    )
+    for horizon in _HORIZONS:
+        horizon_key = f"{horizon}d"
+        result = out.get(horizon_key)
+        if not isinstance(result, dict):
+            result = _empty_backtest_result(feature_df, horizon)
+            out[horizon_key] = result
+        result["open_predictions"] = open_by_horizon.get(horizon_key, [])
+        result["open_prediction_count"] = len(result["open_predictions"])
+    return out
+
+
 def build_entry_decision_from_frame(
     symbol: str,
     frame: pd.DataFrame,
@@ -4700,6 +5094,7 @@ def build_entry_decision_context_from_frame(
         "feature_df": feature_df,
         "decisions_by_index": decisions_by_index,
         "backtest_1y": backtest_1y,
+        "_point_in_time_cache": {},
     }
 
 
@@ -4714,6 +5109,7 @@ def build_entry_decision_from_context(
     feature_df = context.get("feature_df")
     decisions_by_index = context.get("decisions_by_index")
     backtest_1y = context.get("backtest_1y")
+    point_in_time_cache = context.get("_point_in_time_cache")
     if not symbol:
         raise ValueError("Entry decision context is missing a symbol.")
     if feature_df is None or getattr(feature_df, "empty", True):
@@ -4722,12 +5118,16 @@ def build_entry_decision_from_context(
         decisions_by_index = {}
     if not isinstance(backtest_1y, dict):
         backtest_1y = {}
+    if not isinstance(point_in_time_cache, dict):
+        point_in_time_cache = {}
+        context["_point_in_time_cache"] = point_in_time_cache
     return _build_payload_from_context(
         symbol,
         as_of_date=as_of_date,
         feature_df=feature_df,
         decisions_by_index=decisions_by_index,
         backtest_1y=backtest_1y,
+        point_in_time_cache=point_in_time_cache,
     )
 
 
@@ -4772,7 +5172,7 @@ def _entry_cache_day() -> str:
 
 
 @lru_cache(maxsize=_ENTRY_CONTEXT_CACHE_SIZE)
-def _get_entry_context_cached(symbol: str, cache_day: str) -> tuple[str, pd.DataFrame, dict[int, dict], dict]:
+def _get_entry_feature_context_cached(symbol: str, cache_day: str) -> tuple[str, pd.DataFrame, dict]:
     _ = cache_day
     resolved_symbol, frame = _load_entry_frame(symbol)
     if frame.empty:
@@ -4784,28 +5184,20 @@ def _get_entry_context_cached(symbol: str, cache_day: str) -> tuple[str, pd.Data
         earnings_dates=None,
         context_frames=_load_context_frames(resolved_symbol or symbol),
     )
-    decisions_by_index: dict[int, dict] = {}
-    decisions_by_index, backtest_1y = _finalize_deployment_quality(feature_df, decisions_by_index)
-    latest_idx = len(feature_df) - 1
-    if latest_idx not in decisions_by_index:
-        decisions_by_index[latest_idx] = evaluate_row_decision(
-            feature_df.iloc[latest_idx],
-            feature_df=feature_df,
-            row_index=latest_idx,
-            force_prediction=True,
-        )
-        direction_gates = {
-            horizon_key: result.get("direction_quality_gate", {})
-            for horizon_key, result in backtest_1y.items()
-            if isinstance(result, dict)
-        }
-        _apply_direction_quality_gates_to_decision(decisions_by_index[latest_idx], direction_gates)
-        _apply_coverage_repair_policies(
-            feature_df,
-            {latest_idx: decisions_by_index[latest_idx]},
-            _coverage_repair_policies_by_horizon(backtest_1y),
-        )
-    return resolved_symbol or symbol, feature_df, decisions_by_index, backtest_1y
+    return resolved_symbol or symbol, feature_df, {}
+
+
+@lru_cache(maxsize=_ENTRY_CONTEXT_CACHE_SIZE)
+def _get_entry_context_cached(symbol: str, cache_day: str) -> tuple[str, pd.DataFrame, dict[int, dict], dict, dict]:
+    resolved_symbol, feature_df, point_in_time_cache = _get_entry_feature_context_cached(
+        symbol,
+        cache_day,
+    )
+    decisions_by_index, backtest_1y = _finalized_point_in_time_context(
+        feature_df,
+        force_latest_prediction=True,
+    )
+    return resolved_symbol or symbol, feature_df, decisions_by_index, backtest_1y, point_in_time_cache
 
 
 def _build_payload_from_context(
@@ -4815,31 +5207,41 @@ def _build_payload_from_context(
     feature_df: pd.DataFrame,
     decisions_by_index: dict[int, dict],
     backtest_1y: dict,
+    point_in_time_cache: dict[int, dict] | None = None,
 ) -> dict:
     parsed_as_of_date = _parse_as_of_date(as_of_date)
     resolved_idx, date_was_snapped = _resolve_as_of_index(feature_df, parsed_as_of_date)
-    selected_row = feature_df.iloc[resolved_idx]
     latest_selected = resolved_idx == len(feature_df) - 1
-    selected_decision = decisions_by_index.get(resolved_idx)
-    if selected_decision is None:
-        selected_decision = evaluate_row_decision(
-            selected_row,
-            feature_df=feature_df,
-            row_index=resolved_idx,
+    if latest_selected:
+        scoped_feature_df = feature_df
+        scoped_decisions_by_index = deepcopy(decisions_by_index)
+        scoped_backtest_1y = deepcopy(backtest_1y)
+        selected_idx = resolved_idx
+    else:
+        scoped_feature_df, scoped_decisions_by_index, scoped_backtest_1y = _point_in_time_context_for_index(
+            feature_df,
+            resolved_idx,
+            point_in_time_cache=point_in_time_cache,
+        )
+        selected_idx = len(scoped_feature_df) - 1
+
+    selected_row = scoped_feature_df.iloc[selected_idx]
+    selected_decision = deepcopy(
+        _ensure_decision_for_index(
+            scoped_feature_df,
+            scoped_decisions_by_index,
+            scoped_backtest_1y,
+            selected_idx,
             force_prediction=latest_selected,
         )
-        direction_gates = {
-            horizon_key: result.get("direction_quality_gate", {})
-            for horizon_key, result in backtest_1y.items()
-            if isinstance(result, dict)
-        }
-        _apply_direction_quality_gates_to_decision(selected_decision, direction_gates)
-        _apply_coverage_repair_policies(
-            feature_df,
-            {resolved_idx: selected_decision},
-            _coverage_repair_policies_by_horizon(backtest_1y),
-        )
-    selected_decision = deepcopy(selected_decision)
+    )
+    scoped_backtest_1y = _attach_open_predictions_to_backtest(
+        scoped_backtest_1y,
+        scoped_feature_df,
+        selected_idx=selected_idx,
+        selected_decision=selected_decision,
+        point_in_time_cache=point_in_time_cache,
+    )
 
     return {
         "symbol": symbol,
@@ -4854,11 +5256,11 @@ def _build_payload_from_context(
             "continuation": _CONTINUATION_DEPLOYMENT_THRESHOLD,
             "reversal": _REVERSAL_DEPLOYMENT_THRESHOLD,
         },
-        "context_status": deepcopy(feature_df.attrs.get("context_status", {})),
+        "context_status": deepcopy(scoped_feature_df.attrs.get("context_status", {})),
         "horizons": selected_decision["horizons"],
         "top_reasons": selected_decision["top_reasons"],
-        "backtest_1y": deepcopy(backtest_1y),
-        "chart_data": _build_entry_chart_data(feature_df),
+        "backtest_1y": scoped_backtest_1y,
+        "chart_data": _build_entry_chart_data(scoped_feature_df),
     }
 
 
@@ -4866,6 +5268,25 @@ def get_entry_decision(symbol: str, as_of_date: str | None = None) -> dict:
     normalized = normalize_symbol(symbol)
     if not normalized:
         raise ValueError("Missing symbol for entry decision")
+
+    parsed_as_of_date = _parse_as_of_date(as_of_date)
+    if parsed_as_of_date is not None:
+        resolved_symbol, feature_df, point_in_time_cache = _get_entry_feature_context_cached(
+            normalized,
+            _entry_cache_day(),
+        )
+        resolved_idx, _date_was_snapped = _resolve_as_of_index(feature_df, parsed_as_of_date)
+        if resolved_idx != len(feature_df) - 1:
+            return build_entry_decision_from_context(
+                {
+                    "symbol": normalize_symbol(resolved_symbol or normalized),
+                    "feature_df": feature_df,
+                    "decisions_by_index": {},
+                    "backtest_1y": {},
+                    "_point_in_time_cache": point_in_time_cache,
+                },
+                as_of_date=as_of_date,
+            )
 
     context = get_entry_decision_context(normalized)
     return build_entry_decision_from_context(context, as_of_date=as_of_date)
@@ -4876,12 +5297,16 @@ def get_entry_decision_context(symbol: str) -> dict:
     if not normalized:
         raise ValueError("Missing symbol for entry decision")
 
-    _, feature_df, decisions_by_index, backtest_1y = _get_entry_context_cached(normalized, _entry_cache_day())
+    _, feature_df, decisions_by_index, backtest_1y, point_in_time_cache = _get_entry_context_cached(
+        normalized,
+        _entry_cache_day(),
+    )
     return {
         "symbol": normalized,
         "feature_df": feature_df,
         "decisions_by_index": decisions_by_index,
         "backtest_1y": backtest_1y,
+        "_point_in_time_cache": point_in_time_cache,
     }
 
 

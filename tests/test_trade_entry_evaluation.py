@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import analysis.trade_entry_evaluation as tee
 from analysis.indicators import compute_bollinger_bands
 from analysis.trade_entry_evaluation import (
     _MODEL_FEATURES,
@@ -11,6 +12,7 @@ from analysis.trade_entry_evaluation import (
     _finalize_deployment_quality,
     _prepare_feature_frame,
     _reversal_veto_reason,
+    build_entry_decision_from_context,
     build_entry_decision_from_frame,
     evaluate_row_decision,
     run_decision_backtest,
@@ -91,10 +93,39 @@ def _manual_horizon(status, predicted_direction=None, confidence=0.7, tier=None,
 
 def _manual_decision(h5, h10):
     return {
+        "touched_side": "Upper",
+        "setup_type": "upper_band_touch",
+        "event_risk_blocked": False,
         "horizons": {
             "5d": h5,
             "10d": h10,
+        },
+        "top_reasons": [],
+    }
+
+
+def _minimal_feature_context_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "date": pd.bdate_range("2026-05-05", periods=3),
+            "open": [100.0, 101.0, 102.0],
+            "high": [102.0, 104.0, 103.0],
+            "low": [99.0, 100.0, 101.0],
+            "close": [101.0, 103.0, 102.5],
+            "BB_upper": [110.0, 102.0, 110.0],
+            "BB_lower": [90.0, 92.0, 91.0],
+            "BB_middle": [100.0, 97.0, 100.5],
+            "ATR14": [2.0, 2.0, 2.0],
+            "touched_side": [None, "Upper", None],
+            "event_risk_blocked": [False, False, False],
         }
+    )
+
+
+def _minimal_backtest_payload() -> dict:
+    return {
+        "5d": {"predictions": [], "recent_predictions": []},
+        "10d": {"predictions": [], "recent_predictions": []},
     }
 
 
@@ -438,6 +469,81 @@ def test_backtest_scores_5d_and_10d_direction_and_excludes_no_predictions():
     by_date = {item["signal_date"]: item for item in backtest["10d"]["recent_predictions"]}
     assert by_date["2025-01-02"]["predicted_direction"] == "reversal"
     assert by_date["2025-01-03"]["actual_direction"] == "continuation"
+
+
+def test_backtest_adds_expected_value_and_confidence_bucket_scoring():
+    df = pd.DataFrame(
+        {
+            "date": pd.bdate_range("2025-01-02", periods=16),
+            "close": [
+                100.0,
+                100.0,
+                100.0,
+                100.0,
+                100.0,
+                110.0,
+                95.0,
+                90.0,
+                102.0,
+                104.0,
+                100.0,
+                100.0,
+                100.0,
+                100.0,
+                100.0,
+                100.0,
+            ],
+            "ATR14": [10.0] * 16,
+            "touched_side": ["Upper", "Upper", "Lower", "Lower", "Upper"] + [None] * 11,
+        }
+    )
+    decisions = {
+        0: _manual_decision(
+            _manual_horizon("prediction", "continuation", confidence=0.64),
+            _manual_horizon("no_prediction"),
+        ),
+        1: _manual_decision(
+            _manual_horizon("prediction", "reversal", confidence=0.67),
+            _manual_horizon("no_prediction"),
+        ),
+        2: _manual_decision(
+            _manual_horizon("prediction", "continuation", confidence=0.84),
+            _manual_horizon("no_prediction"),
+        ),
+        3: _manual_decision(
+            _manual_horizon("prediction", "reversal", confidence=0.87),
+            _manual_horizon("no_prediction"),
+        ),
+        4: _manual_decision(
+            _manual_horizon("prediction", "reversal", confidence=0.94),
+            _manual_horizon("no_prediction"),
+        ),
+    }
+
+    backtest = run_decision_backtest(df, decisions_by_index=decisions)
+    five_day = backtest["5d"]
+
+    assert five_day["accuracy"] == 1.0
+    assert five_day["win_rate"] == pytest.approx(0.8)
+    assert five_day["expected_return"] == pytest.approx(0.046)
+    assert five_day["expected_downside"] == pytest.approx(-0.04)
+    assert five_day["expected_atr_return"] == pytest.approx(0.46)
+    assert five_day["atr_reward_risk"] == pytest.approx(1.6875)
+
+    by_date = {item["signal_date"]: item for item in five_day["predictions"]}
+    assert by_date["2025-01-08"]["is_correct"] is True
+    assert by_date["2025-01-08"]["trade_direction"] == "short"
+    assert by_date["2025-01-08"]["trade_return"] == pytest.approx(-0.04)
+
+    buckets = {item["bucket"]: item for item in five_day["confidence_buckets"]}
+    assert buckets["60-69"]["prediction_count"] == 2
+    assert buckets["60-69"]["win_rate"] == 1.0
+    assert buckets["60-69"]["expected_return"] == pytest.approx(0.075)
+    assert buckets["80-89"]["prediction_count"] == 2
+    assert buckets["80-89"]["expected_return"] == pytest.approx(0.06)
+    assert buckets["90-99"]["prediction_count"] == 1
+    assert buckets["90-99"]["win_rate"] == 0.0
+    assert buckets["90-99"]["expected_downside"] == pytest.approx(-0.04)
 
 
 def test_backtest_excludes_rows_without_enough_future_data():
@@ -799,6 +905,80 @@ def test_as_of_date_exact_trading_day_uses_same_date():
     assert payload["requested_as_of_date"] == target_date
     assert payload["as_of_date"] == target_date
     assert payload["date_was_snapped"] is False
+
+
+def test_historical_as_of_rebuilds_point_in_time_decision_instead_of_latest_context(monkeypatch):
+    frame = _minimal_feature_context_frame()
+    may6_prediction = _manual_decision(
+        _manual_horizon("prediction", "reversal", confidence=0.91),
+        _manual_horizon("prediction", "reversal", confidence=0.93),
+    )
+    latest_rollback = _manual_decision(
+        _manual_horizon("no_prediction"),
+        _manual_horizon("no_prediction"),
+    )
+
+    def fake_finalize(feature_df, decisions_by_index):
+        if len(feature_df) == 2:
+            decisions_by_index[1] = may6_prediction
+        else:
+            decisions_by_index[1] = latest_rollback
+        return decisions_by_index, _minimal_backtest_payload()
+
+    monkeypatch.setattr(tee, "_finalize_deployment_quality", fake_finalize)
+    context = {
+        "symbol": "GOOGL",
+        "feature_df": frame,
+        "decisions_by_index": {1: latest_rollback},
+        "backtest_1y": _minimal_backtest_payload(),
+    }
+
+    payload = build_entry_decision_from_context(context, as_of_date="2026-05-06")
+
+    assert payload["as_of_date"] == "2026-05-06"
+    assert payload["chart_data"][-1]["date"] == "2026-05-06"
+    assert payload["horizons"]["10d"]["status"] == "prediction"
+    assert payload["horizons"]["10d"]["predicted_direction"] == "reversal"
+    assert payload["backtest_1y"]["10d"]["open_predictions"][0]["signal_date"] == "2026-05-06"
+    assert payload["backtest_1y"]["10d"]["open_predictions"][0]["predicted_direction"] == "reversal"
+
+
+def test_latest_payload_keeps_prior_open_prediction_marker(monkeypatch):
+    frame = _minimal_feature_context_frame()
+    may6_prediction = _manual_decision(
+        _manual_horizon("prediction", "reversal", confidence=0.91),
+        _manual_horizon("prediction", "reversal", confidence=0.93),
+    )
+    latest_no_touch = {
+        "touched_side": None,
+        "setup_type": "no_band_setup",
+        "event_risk_blocked": False,
+        "horizons": {
+            "5d": _manual_horizon("no_prediction"),
+            "10d": _manual_horizon("no_prediction"),
+        },
+        "top_reasons": [],
+    }
+    monkeypatch.setattr(
+        tee,
+        "_point_in_time_decision_for_index",
+        lambda feature_df, idx, cache=None, point_in_time_cache=None: may6_prediction,
+    )
+    context = {
+        "symbol": "GOOGL",
+        "feature_df": frame,
+        "decisions_by_index": {2: latest_no_touch},
+        "backtest_1y": _minimal_backtest_payload(),
+    }
+
+    payload = build_entry_decision_from_context(context, as_of_date="2026-05-07")
+
+    open_predictions = payload["backtest_1y"]["10d"]["open_predictions"]
+    assert payload["as_of_date"] == "2026-05-07"
+    assert len(open_predictions) == 1
+    assert open_predictions[0]["signal_date"] == "2026-05-06"
+    assert open_predictions[0]["status"] == "open"
+    assert open_predictions[0]["predicted_direction"] == "reversal"
 
 
 def test_as_of_date_weekend_snaps_to_previous_trading_day():

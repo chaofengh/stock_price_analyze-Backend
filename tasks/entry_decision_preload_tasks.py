@@ -50,7 +50,7 @@ DEFAULT_INTERACTIVE_FAILURE_BACKOFF_SECONDS = max(
 )
 DEFAULT_WORKER_TIMEOUT_SECONDS = max(
     1.0,
-    float(os.getenv("ENTRY_DECISION_PRELOAD_TIMEOUT_SECONDS", "120")),
+    float(os.getenv("ENTRY_DECISION_PRELOAD_TIMEOUT_SECONDS", "300")),
 )
 _MAX_CACHE_ENTRIES = max(1, int(os.getenv("ENTRY_DECISION_PRELOAD_CACHE_SIZE", "128")))
 _CONTEXT_SYMBOLS = ("QQQ", "XLK")
@@ -584,8 +584,8 @@ def _compute_interactive_artifacts(
     as_of_date: str,
 ) -> tuple[dict[str, dict], dict[str, dict], dict[str, str]]:
     """
-    Build user-requested payloads and contexts through the robust loader, but
-    inside the worker process.
+    Build the expensive reusable model context once, then render the selected
+    date from that context.
     """
     loaded: dict[str, dict] = {}
     contexts: dict[str, dict] = {}

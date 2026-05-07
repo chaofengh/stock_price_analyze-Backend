@@ -6,6 +6,7 @@ from app import create_app
 import tasks.daily_scan_tasks as daily_scan_tasks
 from tasks.entry_decision_preload_tasks import (
     _reset_entry_decision_preload_state_for_tests,
+    store_entry_decision_context,
     store_preloaded_entry_decision,
 )
 
@@ -113,6 +114,39 @@ def test_summary_entry_decision_returns_preloaded_payload(mock_request_preload, 
     assert data["symbol"] == "AMD"
     assert data["requested_as_of_date"] == "2026-04-15"
     assert data["setup_type"] == "lower_band_touch"
+    mock_request_preload.assert_not_called()
+    _reset_entry_decision_preload_state_for_tests()
+
+
+@patch('routes.summary_routes.request_full_entry_decision_preload')
+def test_summary_entry_decision_renders_selected_date_from_cached_model_context(mock_request_preload, client):
+    _reset_entry_decision_preload_state_for_tests()
+    context = {"symbol": "AMD", "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}}
+
+    with (
+        patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
+        patch(
+            "tasks.entry_decision_preload_tasks.build_entry_decision_from_context",
+            return_value={
+                "symbol": "AMD",
+                "requested_as_of_date": "2026-04-10",
+                "as_of_date": "2026-04-10",
+                "setup_type": "lower_band_touch",
+                "touched_side": "Lower",
+                "horizons": {},
+                "top_reasons": [],
+                "backtest_1y": {},
+                "chart_data": [],
+            },
+        ) as mock_build_payload,
+    ):
+        assert store_entry_decision_context("AMD", context)
+        response = client.get('/api/summary/entry-decision?symbol=AMD&as_of_date=2026-04-10')
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["requested_as_of_date"] == "2026-04-10"
+    mock_build_payload.assert_called_once_with(context, as_of_date="2026-04-10")
     mock_request_preload.assert_not_called()
     _reset_entry_decision_preload_state_for_tests()
 

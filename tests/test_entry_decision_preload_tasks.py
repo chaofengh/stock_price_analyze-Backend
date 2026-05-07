@@ -1,6 +1,6 @@
 import os
 import time
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import tasks.daily_scan_tasks as daily_scan_tasks
 import tasks.entry_decision_preload_tasks as preload_tasks
@@ -31,7 +31,7 @@ def test_alert_symbols_from_payload_normalizes_and_dedupes():
 
 
 def test_default_worker_timeout_allows_realistic_cold_entry_model_runtime():
-    assert preload_tasks.DEFAULT_WORKER_TIMEOUT_SECONDS >= 90
+    assert preload_tasks.DEFAULT_WORKER_TIMEOUT_SECONDS >= 180
 
 
 def test_preload_skips_without_cached_alert_scan():
@@ -147,6 +147,7 @@ def test_preload_uses_batched_price_data_without_request_compute_path():
             }
         )
 
+    context = {"symbol": "AMD", "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}}
     with (
         patch(
             "tasks.entry_decision_preload_tasks.prepare_stock_data",
@@ -154,7 +155,7 @@ def test_preload_uses_batched_price_data_without_request_compute_path():
         ) as mock_prepare,
         patch(
             "tasks.entry_decision_preload_tasks.build_entry_decision_context_from_frame",
-            return_value={"symbol": "AMD", "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}},
+            return_value=context,
         ) as mock_build_context,
         patch(
             "tasks.entry_decision_preload_tasks.build_entry_decision_from_context",
@@ -172,10 +173,7 @@ def test_preload_uses_batched_price_data_without_request_compute_path():
     mock_build_context.assert_called_once()
     assert mock_build_context.call_args.kwargs["earnings_dates"] == set()
     assert set(mock_build_context.call_args.kwargs["context_frames"].keys()) == {"QQQ", "XLK"}
-    mock_build_payload.assert_called_once_with(
-        {"symbol": "AMD", "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}},
-        as_of_date="2026-04-15",
-    )
+    mock_build_payload.assert_called_once_with(context, as_of_date="2026-04-15")
 
 
 def test_preload_enters_global_backoff_when_price_source_returns_no_frames():
@@ -187,8 +185,8 @@ def test_preload_enters_global_backoff_when_price_source_returns_no_frames():
         patch.dict(os.environ, {"ENTRY_DECISION_PRELOAD_FULL_ENABLED": "1", "ENTRY_DECISION_PRELOAD_INLINE": "1"}),
         patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
         patch(
-            "tasks.entry_decision_preload_tasks._compute_preload_payloads",
-            return_value=({}, {"AMD": "no data", "__global__": "no data"}),
+            "tasks.entry_decision_preload_tasks._compute_preload_artifacts",
+            return_value=({}, {}, {"AMD": "no data", "__global__": "no data"}),
         ) as mock_compute,
     ):
         first = preload_tasks.preload_entry_decisions_from_latest_alerts(
@@ -216,7 +214,7 @@ def test_preload_scheduler_starts_worker_and_returns_immediately():
         patch.dict(os.environ, {"ENTRY_DECISION_PRELOAD_FULL_ENABLED": "1"}),
         patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
         patch("tasks.entry_decision_preload_tasks._start_preload_worker") as mock_start,
-        patch("tasks.entry_decision_preload_tasks._compute_preload_payloads") as mock_compute,
+        patch("tasks.entry_decision_preload_tasks._compute_preload_artifacts") as mock_compute,
     ):
         result = preload_tasks.preload_entry_decisions_from_latest_alerts(
             max_symbols=1,
@@ -268,8 +266,9 @@ def test_user_alert_payload_preload_starts_robust_alert_worker_immediately():
     mock_start.assert_called_once_with(["UBER", "AMD"], "2026-04-15", source="alert")
 
 
-def test_user_alert_payload_preload_inline_uses_robust_entry_decision_loader():
+def test_user_alert_payload_preload_inline_stores_reusable_context_for_date_changes():
     payload = {"timestamp": "2026-04-15 10:05:00", "alerts": [{"symbol": "UBER"}]}
+    context = {"symbol": "UBER", "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}}
 
     with (
         patch.dict(
@@ -278,23 +277,43 @@ def test_user_alert_payload_preload_inline_uses_robust_entry_decision_loader():
         ),
         patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
         patch(
-            "tasks.entry_decision_preload_tasks.get_entry_decision",
-            return_value={"symbol": "UBER", "horizons": {}, "backtest_1y": {}, "chart_data": []},
-        ) as mock_get_entry_decision,
-        patch("tasks.entry_decision_preload_tasks._compute_preload_payloads") as mock_lightweight,
+            "tasks.entry_decision_preload_tasks.get_entry_decision_context",
+            return_value=context,
+        ) as mock_get_context,
+        patch(
+            "tasks.entry_decision_preload_tasks.build_entry_decision_from_context",
+            side_effect=lambda _context, as_of_date=None: {
+                "symbol": "UBER",
+                "requested_as_of_date": as_of_date,
+                "as_of_date": as_of_date,
+                "horizons": {},
+                "backtest_1y": {},
+                "chart_data": [],
+            },
+        ) as mock_build_payload,
+        patch("tasks.entry_decision_preload_tasks._compute_preload_artifacts") as mock_lightweight,
     ):
         result = preload_tasks.preload_entry_decisions_from_alert_payload(payload, min_idle_seconds=0)
+        selected_date_payload = preload_tasks.get_preloaded_entry_decision(
+            "UBER",
+            as_of_date="2026-04-10",
+            full_only=True,
+        )
 
     assert result["status"] == "loaded"
     assert result["symbols"] == ["UBER"]
-    with patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"):
-        assert preload_tasks.get_preloaded_entry_decision("UBER", as_of_date="2026-04-15")["symbol"] == "UBER"
-    mock_get_entry_decision.assert_called_once_with("UBER", as_of_date="2026-04-15")
+    assert selected_date_payload["requested_as_of_date"] == "2026-04-10"
+    mock_get_context.assert_called_once_with("UBER")
+    assert mock_build_payload.call_args_list == [
+        call(context, as_of_date="2026-04-15"),
+        call(context, as_of_date="2026-04-10"),
+    ]
     mock_lightweight.assert_not_called()
 
 
 def test_user_alert_payload_preload_uses_alert_timestamp_as_request_date():
     payload = {"timestamp": "2026-04-14 15:35:00", "alerts": [{"symbol": "UBER"}]}
+    context = {"symbol": "UBER", "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}}
 
     with (
         patch.dict(
@@ -303,9 +322,20 @@ def test_user_alert_payload_preload_uses_alert_timestamp_as_request_date():
         ),
         patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
         patch(
-            "tasks.entry_decision_preload_tasks.get_entry_decision",
-            return_value={"symbol": "UBER", "horizons": {}, "backtest_1y": {}, "chart_data": []},
-        ) as mock_get_entry_decision,
+            "tasks.entry_decision_preload_tasks.get_entry_decision_context",
+            return_value=context,
+        ) as mock_get_context,
+        patch(
+            "tasks.entry_decision_preload_tasks.build_entry_decision_from_context",
+            side_effect=lambda _context, as_of_date=None: {
+                "symbol": "UBER",
+                "requested_as_of_date": as_of_date,
+                "as_of_date": as_of_date,
+                "horizons": {},
+                "backtest_1y": {},
+                "chart_data": [],
+            },
+        ) as mock_build_payload,
     ):
         result = preload_tasks.preload_entry_decisions_from_alert_payload(payload, min_idle_seconds=0)
         cached_on_alert_date = preload_tasks.get_preloaded_entry_decision("UBER", as_of_date="2026-04-14")
@@ -313,8 +343,35 @@ def test_user_alert_payload_preload_uses_alert_timestamp_as_request_date():
 
     assert result["status"] == "loaded"
     assert cached_on_alert_date["symbol"] == "UBER"
-    assert cached_on_cache_day is None
-    mock_get_entry_decision.assert_called_once_with("UBER", as_of_date="2026-04-14")
+    assert cached_on_cache_day["requested_as_of_date"] == "2026-04-15"
+    mock_get_context.assert_called_once_with("UBER")
+    assert mock_build_payload.call_args_list == [
+        call(context, as_of_date="2026-04-14"),
+        call(context, as_of_date="2026-04-15"),
+    ]
+
+
+def test_preloaded_context_renders_selected_date_without_new_worker_payload():
+    context = {"symbol": "AMD", "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}}
+    with (
+        patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
+        patch(
+            "tasks.entry_decision_preload_tasks.build_entry_decision_from_context",
+            return_value={
+                "symbol": "AMD",
+                "requested_as_of_date": "2026-04-10",
+                "as_of_date": "2026-04-10",
+                "horizons": {},
+                "backtest_1y": {},
+                "chart_data": [],
+            },
+        ) as mock_build_payload,
+    ):
+        assert preload_tasks.store_entry_decision_context("AMD", context)
+        payload = preload_tasks.get_preloaded_entry_decision("AMD", as_of_date="2026-04-10", full_only=True)
+
+    assert payload["requested_as_of_date"] == "2026-04-10"
+    mock_build_payload.assert_called_once_with(context, as_of_date="2026-04-10")
 
 
 def test_user_alert_payload_queues_all_symbols_when_worker_is_busy():
@@ -770,16 +827,25 @@ def test_interactive_preload_reports_worker_start_failure():
     assert result["retry_after_seconds"] == preload_tasks.DEFAULT_INTERACTIVE_FAILURE_BACKOFF_SECONDS
 
 
-def test_interactive_worker_uses_robust_entry_decision_loader():
-    with patch(
-        "tasks.entry_decision_preload_tasks.get_entry_decision",
-        return_value={"symbol": "SPOT", "horizons": {}, "backtest_1y": {}, "chart_data": []},
-    ) as mock_get_entry_decision:
-        loaded, failed = preload_tasks._compute_interactive_payloads(["SPOT"], "2026-04-15")
+def test_interactive_worker_returns_reusable_context():
+    context = {"symbol": "SPOT", "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}}
+    with (
+        patch(
+            "tasks.entry_decision_preload_tasks.get_entry_decision_context",
+            return_value=context,
+        ) as mock_get_context,
+        patch(
+            "tasks.entry_decision_preload_tasks.build_entry_decision_from_context",
+            return_value={"symbol": "SPOT", "horizons": {}, "backtest_1y": {}, "chart_data": []},
+        ) as mock_build_payload,
+    ):
+        loaded, contexts, failed = preload_tasks._compute_interactive_artifacts(["SPOT"], "2026-04-15")
 
     assert failed == {}
     assert loaded["SPOT"]["symbol"] == "SPOT"
-    mock_get_entry_decision.assert_called_once_with("SPOT", as_of_date="2026-04-15")
+    assert contexts["SPOT"] is context
+    mock_get_context.assert_called_once_with("SPOT")
+    mock_build_payload.assert_called_once_with(context, as_of_date="2026-04-15")
 
 
 def test_interactive_worker_failure_sets_short_backoff_not_background_backoff():
@@ -882,7 +948,7 @@ def test_preload_skips_while_request_is_active():
 
     preload_tasks.mark_backend_request_started()
     try:
-        with patch("tasks.entry_decision_preload_tasks._compute_preload_payloads") as mock_compute:
+        with patch("tasks.entry_decision_preload_tasks._compute_preload_artifacts") as mock_compute:
             result = preload_tasks.preload_entry_decisions_from_latest_alerts(
                 max_symbols=1,
                 min_idle_seconds=0,
