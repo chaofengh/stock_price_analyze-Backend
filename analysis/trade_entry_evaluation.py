@@ -4661,6 +4661,7 @@ def build_entry_decision_from_frame(
     as_of_date: str | pd.Timestamp | None = None,
     earnings_dates: set[pd.Timestamp] | None = None,
     earnings_symbol: str | None = None,
+    context_frames: dict[str, pd.DataFrame] | None = None,
 ) -> dict:
     normalized = normalize_symbol(symbol)
     if not normalized:
@@ -4672,6 +4673,7 @@ def build_entry_decision_from_frame(
         frame,
         symbol=normalize_symbol(earnings_symbol or normalized),
         earnings_dates=earnings_dates,
+        context_frames=context_frames,
     )
     decisions_by_index: dict[int, dict] = {}
     decisions_by_index, backtest_1y = _finalize_deployment_quality(feature_df, decisions_by_index)

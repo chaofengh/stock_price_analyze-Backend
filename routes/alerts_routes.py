@@ -5,6 +5,7 @@ import time
 from flask import Blueprint, Response, jsonify, request
 
 from tasks.daily_scan_tasks import get_latest_scan_result, scan_updated_evt
+from tasks.entry_decision_preload_tasks import preload_entry_decisions_from_alert_payload
 from database.ticker_repository import get_all_tickers
 from utils.auth import AuthError, authenticate_bearer_token
 
@@ -45,6 +46,7 @@ def alerts_latest():
 
     result = get_latest_scan_result(allow_refresh_if_due=True)
     result = _filter_for_user(result, auth.user_id)
+    preload_entry_decisions_from_alert_payload(result)
     return jsonify(result), 200
 
 @alerts_blueprint.route('/api/alerts/stream', methods=['GET'])
@@ -60,6 +62,7 @@ def alerts_stream():
     def event_stream():
         cur = get_latest_scan_result(allow_refresh_if_due=True)
         cur = _filter_for_user(cur, auth.user_id)
+        preload_entry_decisions_from_alert_payload(cur)
         last_ts = cur.get("timestamp") or ""
         yield "event: alerts_update\n"
         yield f"data: {json.dumps(cur)}\n\n"
@@ -74,6 +77,7 @@ def alerts_stream():
             payload = _filter_for_user(
                 get_latest_scan_result(allow_refresh_if_due=False), auth.user_id
             )
+            preload_entry_decisions_from_alert_payload(payload)
             ts = payload.get("timestamp") or ""
             if ts and ts != last_ts:
                 yield "event: alerts_update\n"

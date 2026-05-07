@@ -1,4 +1,5 @@
 # tests/test_app.py
+import os
 from unittest.mock import patch
 
 from app import create_app, create_scheduler
@@ -61,3 +62,10 @@ def test_create_scheduler_registers_half_hour_scan_and_watchlist_jobs():
     assert watchlist_job["trigger"] == "interval"
     assert watchlist_job["minutes"] == 5
     assert watchlist_job["replace_existing"] is True
+
+    preload_job = next(job for job in fake_scheduler.jobs if job["id"] == "entry_decision_preload")
+    assert preload_job["trigger"] == "interval"
+    assert preload_job["seconds"] == int(os.getenv("ENTRY_DECISION_PRELOAD_INTERVAL_SECONDS", "30"))
+    assert preload_job["replace_existing"] is True
+    assert preload_job["max_instances"] == 1
+    assert preload_job["next_run_time"] is not None

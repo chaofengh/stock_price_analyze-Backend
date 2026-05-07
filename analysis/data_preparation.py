@@ -15,11 +15,12 @@ def prepare_stock_data(
     include_rsi: bool = True,
     period: str = "4mo",
     interval: str = "1d",
+    threads: bool = True,
 ) -> dict:
     """
     Fetch data and compute indicators for one or many symbols.
     """
-    data_dict = fetch_stock_data(symbols, period=period, interval=interval)
+    data_dict = fetch_stock_data(symbols, period=period, interval=interval, threads=threads)
 
     for symbol, df in data_dict.items():
         if df is None or df.empty or "close" not in df.columns:

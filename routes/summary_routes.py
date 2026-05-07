@@ -1,3 +1,6 @@
+import re
+from datetime import datetime
+
 from flask import Blueprint, jsonify, request
 
 from analysis.summary import (
@@ -7,16 +10,66 @@ from analysis.summary import (
     get_summary_peers,
     get_summary_fundamentals,
     get_summary_peer_averages,
-    get_entry_decision,
+)
+from tasks.entry_decision_preload_tasks import (
+    get_preloaded_entry_decision,
+    refresh_entry_decision_preload_state,
+    request_full_entry_decision_preload,
 )
 from utils.serialization import convert_to_python_types
 
 summary_blueprint = Blueprint("summary", __name__)
 
+_TEMPORARY_PRELOAD_REASONS = {
+    "interactive_symbol_preload_backoff",
+    "symbol_preload_backoff",
+    "preload_source_backoff",
+    "preload_start_failed",
+}
+
 
 def _get_symbol() -> str:
     symbol = request.args.get("symbol", default="QQQ")
     return symbol.strip().upper()
+
+
+def _normalize_request_as_of_date(as_of_date: str | None) -> str | None:
+    if as_of_date is None:
+        return None
+    text = str(as_of_date).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) is None:
+        raise ValueError(f"Invalid as_of_date '{as_of_date}'. Expected YYYY-MM-DD.")
+    try:
+        datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"Invalid as_of_date '{as_of_date}'. Expected YYYY-MM-DD.") from None
+    return text
+
+
+def _entry_decision_loading_payload(symbol: str, as_of_date: str | None, preload_result: dict | None) -> dict:
+    retry_after = 2
+    if isinstance(preload_result, dict):
+        try:
+            retry_after = int(float(preload_result.get("retry_after_seconds") or retry_after))
+        except (TypeError, ValueError):
+            retry_after = 2
+    return {
+        "status": "loading",
+        "symbol": symbol,
+        "requested_as_of_date": as_of_date,
+        "retry_after_seconds": max(1, min(retry_after, 30)),
+        "preload": preload_result or {"status": "started"},
+    }
+
+
+def _entry_decision_loading_response(symbol: str, as_of_date: str | None, preload_result: dict | None):
+    payload = _entry_decision_loading_payload(symbol, as_of_date, preload_result)
+    response = jsonify(payload)
+    response.status_code = 202
+    response.headers["Retry-After"] = str(payload["retry_after_seconds"])
+    return response
 
 
 @summary_blueprint.route("/api/summary", methods=["GET"])
@@ -119,7 +172,23 @@ def summary_entry_decision_endpoint():
     symbol = _get_symbol()
     as_of_date = request.args.get("as_of_date", default=None, type=str)
     try:
-        payload = convert_to_python_types(get_entry_decision(symbol, as_of_date=as_of_date))
+        if not symbol:
+            raise ValueError("symbol is required.")
+        as_of_date = _normalize_request_as_of_date(as_of_date)
+        refresh_entry_decision_preload_state()
+        payload = get_preloaded_entry_decision(symbol, as_of_date=as_of_date, full_only=True)
+        if payload is None:
+            preload_result = request_full_entry_decision_preload(
+                symbol,
+                as_of_date=as_of_date,
+                force=True,
+                ignore_backoff=True,
+            )
+            payload = get_preloaded_entry_decision(symbol, as_of_date=as_of_date, full_only=True)
+            if payload is None:
+                if isinstance(preload_result, dict) and preload_result.get("reason") in _TEMPORARY_PRELOAD_REASONS:
+                    preload_result = {**preload_result, "status": "loading"}
+                return _entry_decision_loading_response(symbol, as_of_date, preload_result)
         return jsonify(payload), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400

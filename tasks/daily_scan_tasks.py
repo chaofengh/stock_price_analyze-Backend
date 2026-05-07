@@ -155,6 +155,16 @@ def _get_cached_result() -> dict | None:
         return copy.deepcopy(_cached_scan_result)
 
 
+def get_cached_scan_result() -> dict | None:
+    """
+    Return the latest scan snapshot without triggering a refresh.
+    """
+    cached = _get_cached_result()
+    if cached is None:
+        return None
+    return _with_meta(cached, now=_now_chi())
+
+
 def _store_cached_result(payload: dict, slot_key: str | None = None) -> None:
     global _cached_scan_result, _last_successful_slot_key
     with _cache_lock:

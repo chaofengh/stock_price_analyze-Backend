@@ -1,7 +1,8 @@
 # app.py
 import os
 import atexit
-from flask import Flask
+from datetime import datetime, timedelta
+from flask import Flask, request
 from flask_cors import CORS
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -22,6 +23,22 @@ from routes.world_markets_routes import world_markets_blueprint
 # Scheduled job wrapper
 from tasks.daily_scan_tasks import daily_scan_wrapper, prime_scan_cache
 from tasks.watchlist_cache_tasks import refresh_watchlist_cache
+from tasks.entry_decision_preload_tasks import (
+    mark_backend_request_finished,
+    mark_backend_request_started,
+    preload_entry_decisions_from_latest_alerts,
+)
+
+_REQUEST_ACTIVITY_EXCLUDED_PATHS = {
+    "/api/alerts/latest",
+    "/api/alerts/stream",
+}
+
+
+def _should_track_request_activity() -> bool:
+    if request.method == "OPTIONS":
+        return False
+    return request.path not in _REQUEST_ACTIVITY_EXCLUDED_PATHS
 
 def create_app(testing=False):
     load_dotenv()
@@ -45,6 +62,18 @@ def create_app(testing=False):
     app.register_blueprint(backtest_blueprint)
     app.register_blueprint(ticker_logo_blueprint)
     app.register_blueprint(world_markets_blueprint)
+
+    @app.before_request
+    def _mark_request_started():
+        if not _should_track_request_activity():
+            return
+        mark_backend_request_started()
+
+    @app.teardown_request
+    def _mark_request_finished(_exception=None):
+        if not _should_track_request_activity():
+            return
+        mark_backend_request_finished()
 
     return app
 
@@ -78,6 +107,16 @@ def create_scheduler(app: Flask):
         id="watchlist_cache",
         minutes=5,
         replace_existing=True,
+    )
+    scheduler.add_job(
+        preload_entry_decisions_from_latest_alerts,
+        trigger="interval",
+        id="entry_decision_preload",
+        seconds=int(os.getenv("ENTRY_DECISION_PRELOAD_INTERVAL_SECONDS", "30")),
+        next_run_time=datetime.now(chicago)
+        + timedelta(seconds=int(os.getenv("ENTRY_DECISION_PRELOAD_INITIAL_DELAY_SECONDS", "5"))),
+        replace_existing=True,
+        max_instances=1,
     )
 
     def _log(event):
