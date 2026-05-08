@@ -74,7 +74,16 @@ def test_alerts_latest_preloads_visible_ticker_and_entry_endpoint_returns_cached
         "meta": {"next_run_at": "2026-04-15 11:05:00", "is_official": True},
     }
 
-    def _entry_decision(symbol, as_of_date=None):
+    def _entry_context(symbol):
+        return {
+            "symbol": symbol,
+            "feature_df": object(),
+            "decisions_by_index": {},
+            "backtest_1y": {},
+        }
+
+    def _entry_decision(context, as_of_date=None):
+        symbol = context["symbol"]
         return {
             "symbol": symbol,
             "requested_as_of_date": as_of_date,
@@ -94,7 +103,14 @@ def test_alerts_latest_preloads_visible_ticker_and_entry_endpoint_returns_cached
             patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
             patch("routes.summary_routes.refresh_entry_decision_preload_state", return_value=None),
             patch("routes.summary_routes.request_full_entry_decision_preload") as mock_request_preload,
-            patch("tasks.entry_decision_preload_tasks.get_entry_decision", side_effect=_entry_decision) as mock_entry,
+            patch(
+                "tasks.entry_decision_preload_tasks.get_entry_decision_context",
+                side_effect=_entry_context,
+            ) as mock_context,
+            patch(
+                "tasks.entry_decision_preload_tasks.build_entry_decision_from_context",
+                side_effect=_entry_decision,
+            ) as mock_entry,
             patch("routes.alerts_routes.get_latest_scan_result", return_value=payload),
             patch("routes.alerts_routes.get_all_tickers", return_value=["UBER", "AMD"]),
             patch("routes.alerts_routes.authenticate_bearer_token") as mock_auth,
@@ -109,7 +125,8 @@ def test_alerts_latest_preloads_visible_ticker_and_entry_endpoint_returns_cached
         assert entry_response.status_code == 200
         assert entry_response.get_json()["symbol"] == "UBER"
         mock_request_preload.assert_not_called()
-        assert [call.args[0] for call in mock_entry.call_args_list] == ["UBER", "AMD"]
+        assert [call.args[0] for call in mock_context.call_args_list] == ["UBER", "AMD"]
+        assert [call.args[0]["symbol"] for call in mock_entry.call_args_list] == ["UBER", "AMD"]
         assert [call.kwargs["as_of_date"] for call in mock_entry.call_args_list] == [
             "2026-04-15",
             "2026-04-15",
