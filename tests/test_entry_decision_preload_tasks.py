@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import datetime
 from unittest.mock import call, patch
 
 import tasks.daily_scan_tasks as daily_scan_tasks
@@ -7,6 +8,7 @@ import tasks.entry_decision_preload_tasks as preload_tasks
 
 
 def setup_function():
+    os.environ["ENTRY_DECISION_PRELOAD_MARKET_HOURS_ONLY"] = "0"
     daily_scan_tasks._reset_scan_state_for_tests()
     preload_tasks._reset_entry_decision_preload_state_for_tests()
 
@@ -14,6 +16,7 @@ def setup_function():
 def teardown_function():
     daily_scan_tasks._reset_scan_state_for_tests()
     preload_tasks._reset_entry_decision_preload_state_for_tests()
+    os.environ.pop("ENTRY_DECISION_PRELOAD_MARKET_HOURS_ONLY", None)
 
 
 def test_alert_symbols_from_payload_normalizes_and_dedupes():
@@ -32,6 +35,195 @@ def test_alert_symbols_from_payload_normalizes_and_dedupes():
 
 def test_default_worker_timeout_allows_realistic_cold_entry_model_runtime():
     assert preload_tasks.DEFAULT_WORKER_TIMEOUT_SECONDS >= 180
+
+
+def test_auto_preload_market_gate_blocks_after_chicago_close():
+    after_close = preload_tasks._CHICAGO_TZ.localize(datetime(2026, 4, 16, 15, 1))
+
+    with patch.dict(os.environ, {"ENTRY_DECISION_PRELOAD_MARKET_HOURS_ONLY": "1"}):
+        result = preload_tasks._auto_preload_market_gate(after_close)
+
+    assert result["allowed"] is False
+    assert result["reason"] == "market_closed"
+    assert result["market_close_at"] == "2026-04-16 15:00:00"
+
+
+def test_auto_preload_market_gate_blocks_new_work_near_close():
+    near_close = preload_tasks._CHICAGO_TZ.localize(datetime(2026, 4, 16, 14, 56))
+
+    with patch.dict(
+        os.environ,
+        {
+            "ENTRY_DECISION_PRELOAD_MARKET_HOURS_ONLY": "1",
+            "ENTRY_DECISION_PRELOAD_CLOSE_CUTOFF_MINUTES": "5",
+        },
+    ):
+        result = preload_tasks._auto_preload_market_gate(near_close)
+
+    assert result["allowed"] is False
+    assert result["reason"] == "market_close_cutoff"
+    assert result["preload_cutoff_at"] == "2026-04-16 14:55:00"
+
+
+def test_background_preload_skips_after_market_close_without_starting_work():
+    daily_scan_tasks._store_cached_result(
+        {"timestamp": "2026-04-15 10:05:00", "alerts": [{"symbol": "AMD"}]}
+    )
+
+    with (
+        patch.dict(os.environ, {"ENTRY_DECISION_PRELOAD_MARKET_HOURS_ONLY": "1"}),
+        patch(
+            "tasks.entry_decision_preload_tasks._auto_preload_market_gate",
+            return_value={
+                "allowed": False,
+                "reason": "market_closed",
+                "next_run_at": "2026-04-16 08:35:00",
+            },
+        ),
+        patch("tasks.entry_decision_preload_tasks._start_preload_worker") as mock_start,
+        patch("tasks.entry_decision_preload_tasks._compute_preload_artifacts") as mock_compute,
+    ):
+        result = preload_tasks.preload_entry_decisions_from_latest_alerts(
+            max_symbols=1,
+            min_idle_seconds=0,
+        )
+
+    assert result == {
+        "status": "skipped",
+        "reason": "market_closed",
+        "next_run_at": "2026-04-16 08:35:00",
+    }
+    mock_start.assert_not_called()
+    mock_compute.assert_not_called()
+
+
+def test_alert_payload_preload_skips_after_market_close_without_queueing():
+    payload = {"timestamp": "2026-04-15 10:05:00", "alerts": [{"symbol": "UBER"}]}
+
+    with (
+        patch.dict(os.environ, {"ENTRY_DECISION_PRELOAD_MARKET_HOURS_ONLY": "1"}),
+        patch(
+            "tasks.entry_decision_preload_tasks._auto_preload_market_gate",
+            return_value={
+                "allowed": False,
+                "reason": "market_closed",
+                "next_run_at": "2026-04-16 08:35:00",
+            },
+        ),
+        patch("tasks.entry_decision_preload_tasks._start_preload_worker") as mock_start,
+    ):
+        result = preload_tasks.preload_entry_decisions_from_alert_payload(payload, min_idle_seconds=0)
+
+    assert result == {
+        "status": "skipped",
+        "reason": "market_closed",
+        "next_run_at": "2026-04-16 08:35:00",
+    }
+    assert preload_tasks._alert_preload_queue == []
+    assert preload_tasks._alert_preload_queued == set()
+    mock_start.assert_not_called()
+
+
+def test_market_close_gate_terminates_running_noninteractive_worker():
+    class FakeProcess:
+        terminated = False
+
+        def is_alive(self):
+            return not self.terminated
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.terminated = True
+
+        def join(self, timeout=None):
+            return timeout
+
+    active_process = FakeProcess()
+    preload_tasks._worker_process = active_process
+    preload_tasks._worker_started_at = time.monotonic()
+    preload_tasks._worker_symbols = ["AMD"]
+    preload_tasks._worker_as_of_date = "2026-04-15"
+    preload_tasks._worker_source = "alert"
+
+    with (
+        patch.dict(os.environ, {"ENTRY_DECISION_PRELOAD_MARKET_HOURS_ONLY": "1"}),
+        patch(
+            "tasks.entry_decision_preload_tasks._auto_preload_market_gate",
+            return_value={
+                "allowed": False,
+                "reason": "market_close_cutoff",
+                "next_run_at": "2026-04-16 08:35:00",
+            },
+        ),
+    ):
+        result = preload_tasks.preload_entry_decisions_from_latest_alerts(
+            max_symbols=1,
+            min_idle_seconds=0,
+        )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "market_close_cutoff"
+    assert result["terminated_worker"] == {
+        "status": "terminated",
+        "reason": "market_close_cutoff",
+        "source": "alert",
+        "symbols": ["AMD"],
+        "as_of_date": "2026-04-15",
+    }
+    assert not active_process.is_alive()
+    assert preload_tasks._worker_process is None
+
+
+def test_market_close_gate_does_not_terminate_interactive_worker():
+    class FakeProcess:
+        terminated = False
+        killed = False
+
+        def is_alive(self):
+            return True
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+        def join(self, timeout=None):
+            return timeout
+
+    active_process = FakeProcess()
+    preload_tasks._worker_process = active_process
+    preload_tasks._worker_started_at = time.monotonic()
+    preload_tasks._worker_symbols = ["AMD"]
+    preload_tasks._worker_as_of_date = "2026-04-15"
+    preload_tasks._worker_source = "interactive"
+
+    with (
+        patch.dict(os.environ, {"ENTRY_DECISION_PRELOAD_MARKET_HOURS_ONLY": "1"}),
+        patch(
+            "tasks.entry_decision_preload_tasks._auto_preload_market_gate",
+            return_value={
+                "allowed": False,
+                "reason": "market_closed",
+                "next_run_at": "2026-04-16 08:35:00",
+            },
+        ),
+    ):
+        result = preload_tasks.preload_entry_decisions_from_latest_alerts(
+            max_symbols=1,
+            min_idle_seconds=0,
+        )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "market_closed"
+    assert result["worker"]["status"] == "running"
+    assert result["worker"]["source"] == "interactive"
+    assert preload_tasks._worker_process is active_process
+    assert active_process.terminated is False
+    assert active_process.killed is False
+    preload_tasks._clear_worker_state()
 
 
 def test_preload_skips_without_cached_alert_scan():

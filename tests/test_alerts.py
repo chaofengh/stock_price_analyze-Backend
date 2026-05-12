@@ -98,7 +98,11 @@ def test_alerts_latest_preloads_visible_ticker_and_entry_endpoint_returns_cached
         with (
             patch.dict(
                 "os.environ",
-                {"ENTRY_DECISION_PRELOAD_FULL_ENABLED": "1", "ENTRY_DECISION_PRELOAD_INLINE": "1"},
+                {
+                    "ENTRY_DECISION_PRELOAD_FULL_ENABLED": "1",
+                    "ENTRY_DECISION_PRELOAD_INLINE": "1",
+                    "ENTRY_DECISION_PRELOAD_MARKET_HOURS_ONLY": "0",
+                },
             ),
             patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
             patch("routes.summary_routes.refresh_entry_decision_preload_state", return_value=None),

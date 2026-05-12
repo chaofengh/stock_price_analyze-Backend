@@ -52,12 +52,26 @@ def _session_bounds_for_day(day: date) -> tuple[datetime, datetime] | None:
     return _session_bounds_for_date(day.isoformat())
 
 
+def regular_market_session_bounds_chi(day: date) -> tuple[datetime, datetime] | None:
+    """
+    Return the NYSE regular-session open/close for a date in Chicago time.
+    """
+    return _session_bounds_for_day(day)
+
+
 def _is_within_regular_session(now: datetime) -> bool:
     bounds = _session_bounds_for_day(now.date())
     if bounds is None:
         return False
     open_dt, close_dt = bounds
     return open_dt <= now < close_dt
+
+
+def is_regular_market_session_open(now: datetime | None = None) -> bool:
+    """
+    True only during the NYSE regular session, using Chicago time.
+    """
+    return _is_within_regular_session(now or _now_chi())
 
 
 def _slot_time_for(now: datetime) -> datetime:
@@ -114,6 +128,13 @@ def _next_run_time_chi(now: datetime | None = None) -> datetime:
     # Fallback to keep metadata stable even if calendar lookup fails unexpectedly.
     fallback = _next_slot_at_or_after(now)
     return fallback
+
+
+def next_regular_market_run_time_chi(now: datetime | None = None) -> datetime:
+    """
+    Return the next scheduled market-session scan slot in Chicago time.
+    """
+    return _next_run_time_chi(now)
 
 
 def _with_meta(payload: dict, now: datetime | None = None, is_official: bool | None = None) -> dict:

@@ -29,7 +29,7 @@ def test_app_creation(app):
     assert app.testing is True
 
 
-def test_create_scheduler_registers_half_hour_scan_and_watchlist_jobs():
+def test_create_scheduler_registers_market_hour_scan_watchlist_and_preload_jobs():
     flask_app = create_app(testing=True)
     fake_scheduler = _FakeScheduler()
 
@@ -64,8 +64,9 @@ def test_create_scheduler_registers_half_hour_scan_and_watchlist_jobs():
     assert watchlist_job["replace_existing"] is True
 
     preload_job = next(job for job in fake_scheduler.jobs if job["id"] == "entry_decision_preload")
-    assert preload_job["trigger"] == "interval"
-    assert preload_job["seconds"] == int(os.getenv("ENTRY_DECISION_PRELOAD_INTERVAL_SECONDS", "30"))
+    assert preload_job["trigger"] == "cron"
+    assert preload_job["day_of_week"] == "mon-fri"
+    assert preload_job["hour"] == os.getenv("ENTRY_DECISION_PRELOAD_CRON_HOURS", "8-14")
+    assert preload_job["minute"] == os.getenv("ENTRY_DECISION_PRELOAD_CRON_MINUTES", "*/2")
     assert preload_job["replace_existing"] is True
     assert preload_job["max_instances"] == 1
-    assert preload_job["next_run_time"] is not None

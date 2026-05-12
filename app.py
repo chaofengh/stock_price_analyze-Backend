@@ -1,7 +1,6 @@
 # app.py
 import os
 import atexit
-from datetime import datetime, timedelta
 from flask import Flask, request
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -80,7 +79,7 @@ def create_app(testing=False):
 def create_scheduler(app: Flask):
     """
     Background scheduler pinned to America/Chicago.
-    Scan job runs every 30 minutes during regular NYSE session on weekdays.
+    Market-driven jobs run only during regular NYSE weekday hours.
     """
     chicago = timezone("America/Chicago")
     scheduler = BackgroundScheduler(
@@ -110,11 +109,11 @@ def create_scheduler(app: Flask):
     )
     scheduler.add_job(
         preload_entry_decisions_from_latest_alerts,
-        trigger="interval",
+        trigger="cron",
         id="entry_decision_preload",
-        seconds=int(os.getenv("ENTRY_DECISION_PRELOAD_INTERVAL_SECONDS", "30")),
-        next_run_time=datetime.now(chicago)
-        + timedelta(seconds=int(os.getenv("ENTRY_DECISION_PRELOAD_INITIAL_DELAY_SECONDS", "5"))),
+        day_of_week="mon-fri",
+        hour=os.getenv("ENTRY_DECISION_PRELOAD_CRON_HOURS", "8-14"),
+        minute=os.getenv("ENTRY_DECISION_PRELOAD_CRON_MINUTES", "*/2"),
         replace_existing=True,
         max_instances=1,
     )

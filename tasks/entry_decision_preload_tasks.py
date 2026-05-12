@@ -17,7 +17,7 @@ import pickle
 import tempfile
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable
 
 import pytz
@@ -52,6 +52,10 @@ DEFAULT_WORKER_TIMEOUT_SECONDS = max(
     1.0,
     float(os.getenv("ENTRY_DECISION_PRELOAD_TIMEOUT_SECONDS", "300")),
 )
+DEFAULT_CLOSE_CUTOFF_MINUTES = max(
+    0.0,
+    float(os.getenv("ENTRY_DECISION_PRELOAD_CLOSE_CUTOFF_MINUTES", "5")),
+)
 _MAX_CACHE_ENTRIES = max(1, int(os.getenv("ENTRY_DECISION_PRELOAD_CACHE_SIZE", "128")))
 _CONTEXT_SYMBOLS = ("QQQ", "XLK")
 _TRAINING_HISTORY_PERIOD = "2y"
@@ -81,6 +85,116 @@ def _full_preload_enabled() -> bool:
     if raw is None:
         return True
     return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _auto_preload_market_hours_only() -> bool:
+    raw = os.getenv("ENTRY_DECISION_PRELOAD_MARKET_HOURS_ONLY")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _auto_preload_close_cutoff() -> timedelta:
+    raw = os.getenv("ENTRY_DECISION_PRELOAD_CLOSE_CUTOFF_MINUTES")
+    if raw is None:
+        minutes = DEFAULT_CLOSE_CUTOFF_MINUTES
+    else:
+        try:
+            minutes = float(raw)
+        except ValueError:
+            minutes = DEFAULT_CLOSE_CUTOFF_MINUTES
+    return timedelta(minutes=max(0.0, minutes))
+
+
+def _as_chicago_time(value: datetime | None = None) -> datetime:
+    if value is None:
+        return datetime.now(_CHICAGO_TZ)
+    if value.tzinfo is None:
+        return _CHICAGO_TZ.localize(value)
+    return value.astimezone(_CHICAGO_TZ)
+
+
+def _format_chicago_time(value: datetime) -> str:
+    return value.astimezone(_CHICAGO_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _auto_preload_market_gate(now: datetime | None = None) -> dict:
+    """
+    Gate speculative Entry Decision work to regular market hours.
+
+    Interactive user predictions intentionally bypass this gate.
+    """
+    now_chi = _as_chicago_time(now)
+    if not _auto_preload_market_hours_only():
+        return {"allowed": True, "reason": "market_hours_guard_disabled"}
+
+    from tasks.daily_scan_tasks import (
+        next_regular_market_run_time_chi,
+        regular_market_session_bounds_chi,
+    )
+
+    next_run_at = next_regular_market_run_time_chi(now_chi)
+    closed_result = {
+        "allowed": False,
+        "reason": "market_closed",
+        "checked_at": _format_chicago_time(now_chi),
+        "next_run_at": _format_chicago_time(next_run_at),
+    }
+    session_bounds = regular_market_session_bounds_chi(now_chi.date())
+    if session_bounds is None:
+        return closed_result
+
+    open_dt, close_dt = session_bounds
+    cutoff_dt = close_dt - _auto_preload_close_cutoff()
+    market_metadata = {
+        "market_open_at": _format_chicago_time(open_dt),
+        "market_close_at": _format_chicago_time(close_dt),
+        "preload_cutoff_at": _format_chicago_time(cutoff_dt),
+        "next_run_at": _format_chicago_time(next_run_at),
+    }
+    if now_chi < open_dt:
+        return {**closed_result, **market_metadata}
+    if now_chi >= close_dt:
+        return {**closed_result, **market_metadata}
+    if now_chi >= cutoff_dt:
+        return {
+            "allowed": False,
+            "reason": "market_close_cutoff",
+            "checked_at": _format_chicago_time(now_chi),
+            **market_metadata,
+        }
+    return {
+        "allowed": True,
+        "reason": "market_open",
+        "checked_at": _format_chicago_time(now_chi),
+        **market_metadata,
+    }
+
+
+def _auto_preload_skipped_result(
+    market_gate: dict,
+    *,
+    worker_result: dict | None = None,
+    terminated_worker: dict | None = None,
+) -> dict:
+    result = {
+        "status": "skipped",
+        "reason": market_gate.get("reason", "market_closed"),
+    }
+    for key in (
+        "checked_at",
+        "market_open_at",
+        "market_close_at",
+        "preload_cutoff_at",
+        "next_run_at",
+    ):
+        if market_gate.get(key):
+            result[key] = market_gate[key]
+    if worker_result is not None:
+        result["worker"] = worker_result
+    if terminated_worker is not None:
+        result["terminated_worker"] = terminated_worker
+    return result
 
 
 def _payload_is_full_model(payload: dict | None) -> bool:
@@ -659,6 +773,22 @@ def _terminate_worker() -> None:
     _clear_worker_state()
 
 
+def _terminate_noninteractive_worker_for_market_gate(reason: str) -> dict | None:
+    process = _worker_process
+    if process is None or _worker_source == "interactive" or not process.is_alive():
+        return None
+
+    terminated = {
+        "status": "terminated",
+        "reason": reason,
+        "source": _worker_source or "background",
+        "symbols": list(_worker_symbols),
+        "as_of_date": _worker_as_of_date,
+    }
+    _terminate_worker()
+    return terminated
+
+
 def _start_preload_worker(symbols: list[str], as_of_date: str, *, source: str = "background") -> None:
     global _worker_process, _worker_result_path, _worker_started_at, _worker_symbols, _worker_as_of_date, _worker_source
     result_file = tempfile.NamedTemporaryFile(
@@ -920,7 +1050,21 @@ def preload_entry_decisions_from_latest_alerts(
         return {"status": "skipped", "reason": "preload_coordinator_busy"}
 
     try:
+        market_gate = _auto_preload_market_gate()
+        terminated_worker = None
+        if not market_gate.get("allowed", False):
+            terminated_worker = _terminate_noninteractive_worker_for_market_gate(
+                market_gate.get("reason", "market_closed")
+            )
+
         worker_result = _reap_preload_worker(timeout_seconds)
+        if not market_gate.get("allowed", False):
+            return _auto_preload_skipped_result(
+                market_gate,
+                worker_result=worker_result,
+                terminated_worker=terminated_worker,
+            )
+
         if isinstance(worker_result, dict) and worker_result.get("status") == "running":
             return worker_result
 
@@ -1007,7 +1151,20 @@ def preload_entry_decisions_from_alert_payload(
         return {"status": "skipped", "reason": "preload_coordinator_busy"}
 
     try:
+        market_gate = _auto_preload_market_gate()
+        terminated_worker = None
+        if not market_gate.get("allowed", False):
+            terminated_worker = _terminate_noninteractive_worker_for_market_gate(
+                market_gate.get("reason", "market_closed")
+            )
+
         worker_result = _reap_preload_worker(timeout_seconds)
+        if not market_gate.get("allowed", False):
+            return _auto_preload_skipped_result(
+                market_gate,
+                worker_result=worker_result,
+                terminated_worker=terminated_worker,
+            )
 
         symbols = alert_symbols_from_payload(alert_payload)
         if not symbols:

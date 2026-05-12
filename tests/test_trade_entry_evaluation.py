@@ -523,7 +523,7 @@ def test_backtest_adds_expected_value_and_confidence_bucket_scoring():
     backtest = run_decision_backtest(df, decisions_by_index=decisions)
     five_day = backtest["5d"]
 
-    assert five_day["accuracy"] == 1.0
+    assert five_day["accuracy"] == 0.8
     assert five_day["win_rate"] == pytest.approx(0.8)
     assert five_day["expected_return"] == pytest.approx(0.046)
     assert five_day["expected_downside"] == pytest.approx(-0.04)
@@ -531,7 +531,7 @@ def test_backtest_adds_expected_value_and_confidence_bucket_scoring():
     assert five_day["atr_reward_risk"] == pytest.approx(1.6875)
 
     by_date = {item["signal_date"]: item for item in five_day["predictions"]}
-    assert by_date["2025-01-08"]["is_correct"] is True
+    assert by_date["2025-01-08"]["is_correct"] is False
     assert by_date["2025-01-08"]["trade_direction"] == "short"
     assert by_date["2025-01-08"]["trade_return"] == pytest.approx(-0.04)
 
@@ -575,10 +575,10 @@ def test_backtest_excludes_rows_without_enough_future_data():
     assert backtest["10d"]["incomplete_future_count"] == 1
 
 
-def test_reversal_scoring_treats_flat_within_half_atr_as_correct():
+def test_upper_band_reversal_is_wrong_when_exit_close_is_higher_inside_atr_hurdle():
     df = pd.DataFrame(
         {
-            "date": pd.bdate_range("2025-01-02", periods=12),
+            "date": pd.bdate_range("2026-04-16", periods=12),
             "close": [100.0, 100.0, 100.0, 100.0, 100.0, 104.0, 100.0, 100.0, 100.0, 100.0, 112.0, 100.0],
             "ATR14": [10.0] * 12,
             "touched_side": ["Upper"] + [None] * 11,
@@ -594,11 +594,45 @@ def test_reversal_scoring_treats_flat_within_half_atr_as_correct():
     backtest = run_decision_backtest(df, decisions_by_index=decisions)
 
     assert backtest["5d"]["prediction_count"] == 1
-    assert backtest["5d"]["correct_count"] == 1
-    assert backtest["5d"]["reversal_accuracy"] == 1.0
-    assert backtest["5d"]["flat_count"] == 1
+    assert backtest["5d"]["correct_count"] == 0
+    assert backtest["5d"]["reversal_accuracy"] == 0.0
+    assert backtest["5d"]["flat_count"] == 0
+    prediction = backtest["5d"]["predictions"][0]
+    assert prediction["signal_date"] == "2026-04-16"
+    assert prediction["outcome_date"] == "2026-04-23"
+    assert prediction["actual_direction"] == "continuation"
+    assert prediction["is_correct"] is False
+    assert prediction["trade_direction"] == "short"
+    assert prediction["trade_return"] < 0
     assert backtest["10d"]["correct_count"] == 0
     assert backtest["10d"]["reversal_accuracy"] == 0.0
+
+
+def test_reversal_scoring_accepts_exact_flat_exit():
+    df = pd.DataFrame(
+        {
+            "date": pd.bdate_range("2025-01-02", periods=12),
+            "close": [100.0] * 12,
+            "ATR14": [10.0] * 12,
+            "touched_side": ["Upper"] + [None] * 11,
+        }
+    )
+    decisions = {
+        0: _manual_decision(
+            _manual_horizon("prediction", "reversal"),
+            _manual_horizon("prediction", "reversal"),
+        )
+    }
+
+    backtest = run_decision_backtest(df, decisions_by_index=decisions)
+    prediction = backtest["5d"]["predictions"][0]
+
+    assert prediction["actual_direction"] == "flat"
+    assert prediction["is_correct"] is True
+    assert prediction["trade_return"] == 0.0
+    assert backtest["5d"]["correct_count"] == 1
+    assert backtest["5d"]["flat_count"] == 1
+    assert backtest["5d"]["reversal_accuracy"] == 1.0
 
 
 def test_lower_band_reversal_veto_blocks_falling_knife_without_exhaustion():
@@ -907,29 +941,21 @@ def test_as_of_date_exact_trading_day_uses_same_date():
     assert payload["date_was_snapped"] is False
 
 
-def test_historical_as_of_rebuilds_point_in_time_decision_instead_of_latest_context(monkeypatch):
+def test_historical_as_of_uses_cached_context_without_point_in_time_rebuild(monkeypatch):
     frame = _minimal_feature_context_frame()
     may6_prediction = _manual_decision(
         _manual_horizon("prediction", "reversal", confidence=0.91),
         _manual_horizon("prediction", "reversal", confidence=0.93),
     )
-    latest_rollback = _manual_decision(
-        _manual_horizon("no_prediction"),
-        _manual_horizon("no_prediction"),
-    )
 
-    def fake_finalize(feature_df, decisions_by_index):
-        if len(feature_df) == 2:
-            decisions_by_index[1] = may6_prediction
-        else:
-            decisions_by_index[1] = latest_rollback
-        return decisions_by_index, _minimal_backtest_payload()
+    def fail_point_in_time_rebuild(*_args, **_kwargs):
+        pytest.fail("Selected-date payloads must reuse the cached model context.")
 
-    monkeypatch.setattr(tee, "_finalize_deployment_quality", fake_finalize)
+    monkeypatch.setattr(tee, "_point_in_time_context_for_index", fail_point_in_time_rebuild)
     context = {
         "symbol": "GOOGL",
         "feature_df": frame,
-        "decisions_by_index": {1: latest_rollback},
+        "decisions_by_index": {1: may6_prediction},
         "backtest_1y": _minimal_backtest_payload(),
     }
 
@@ -962,12 +988,12 @@ def test_latest_payload_keeps_prior_open_prediction_marker(monkeypatch):
     monkeypatch.setattr(
         tee,
         "_point_in_time_decision_for_index",
-        lambda feature_df, idx, cache=None, point_in_time_cache=None: may6_prediction,
+        lambda *_args, **_kwargs: pytest.fail("Open prediction markers should reuse cached decisions."),
     )
     context = {
         "symbol": "GOOGL",
         "feature_df": frame,
-        "decisions_by_index": {2: latest_no_touch},
+        "decisions_by_index": {1: may6_prediction, 2: latest_no_touch},
         "backtest_1y": _minimal_backtest_payload(),
     }
 
