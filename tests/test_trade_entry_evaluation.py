@@ -1,6 +1,9 @@
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import pytest
+import pytz
 
 import analysis.trade_entry_evaluation as tee
 from analysis.indicators import compute_bollinger_bands
@@ -13,7 +16,11 @@ from analysis.trade_entry_evaluation import (
     _prepare_feature_frame,
     _reversal_veto_reason,
     build_entry_decision_from_context,
+    build_entry_decision_context_from_frame,
     build_entry_decision_from_frame,
+    entry_decision_feature_schema_version,
+    entry_decision_model_version,
+    evaluate_entry_context_freshness,
     evaluate_row_decision,
     run_decision_backtest,
 )
@@ -1033,3 +1040,81 @@ def test_as_of_date_invalid_format_raises_validation_error():
 
     with pytest.raises(ValueError, match="Expected YYYY-MM-DD"):
         build_entry_decision_from_frame("TEST", df, as_of_date="04/15/2026", earnings_dates=set())
+
+
+def test_entry_context_metadata_versions_data_end_and_quality():
+    df = _force_lower_touch(_base_frame(140))
+
+    context = build_entry_decision_context_from_frame("TEST", df, earnings_dates=set())
+    payload = build_entry_decision_from_context(context)
+
+    meta = context["meta"]
+    assert meta["model_version"] == entry_decision_model_version()
+    assert meta["feature_schema_version"] == entry_decision_feature_schema_version()
+    assert meta["price_data_end_date"] == pd.Timestamp(df.iloc[-1]["date"]).strftime("%Y-%m-%d")
+    assert meta["trained_through_date"] == meta["price_data_end_date"]
+    assert meta["context_key"]
+    assert meta["quality"]["status"] in {"passed", "quarantined", "idle", "unknown"}
+
+    assert payload["meta"]["full_decision_preloaded"] is True
+    assert payload["meta"]["context"]["context_key"] == meta["context_key"]
+    assert payload["meta"]["freshness"]["status"] in {"fresh", "stale", "expired", "unknown"}
+    assert payload["meta"]["quality"] == meta["quality"]
+
+
+def test_entry_context_freshness_detects_fresh_stale_and_expired(monkeypatch):
+    chicago = pytz.timezone("America/Chicago")
+    base_meta = {
+        "model_version": entry_decision_model_version(),
+        "feature_schema_version": entry_decision_feature_schema_version(),
+        "price_data_end_date": "2026-04-15",
+    }
+
+    during_apr16_session = chicago.localize(datetime(2026, 4, 16, 10, 0))
+    after_apr16_close = chicago.localize(datetime(2026, 4, 16, 15, 45))
+    after_apr17_close = chicago.localize(datetime(2026, 4, 17, 15, 45))
+
+    fresh = evaluate_entry_context_freshness(base_meta, now=during_apr16_session)
+    assert fresh["status"] == "fresh"
+    assert fresh["serving_allowed"] is True
+    assert fresh["latest_required_price_date"] == "2026-04-15"
+
+    stale = evaluate_entry_context_freshness(base_meta, now=after_apr16_close)
+    assert stale["status"] == "stale"
+    assert stale["serving_allowed"] is True
+    assert stale["stale_sessions"] == 1
+
+    expired = evaluate_entry_context_freshness(base_meta, now=after_apr17_close)
+    assert expired["status"] == "expired"
+    assert expired["serving_allowed"] is False
+    assert expired["stale_sessions"] == 2
+
+    monkeypatch.setenv("ENTRY_DECISION_CONTEXT_MAX_STALE_SESSIONS", "0")
+    stricter = evaluate_entry_context_freshness(base_meta, now=after_apr16_close)
+    assert stricter["status"] == "expired"
+    assert stricter["serving_allowed"] is False
+
+
+def test_entry_context_freshness_expires_when_model_or_schema_changes():
+    now = pytz.timezone("America/Chicago").localize(datetime(2026, 4, 16, 10, 0))
+    good_meta = {
+        "model_version": entry_decision_model_version(),
+        "feature_schema_version": entry_decision_feature_schema_version(),
+        "price_data_end_date": "2026-04-15",
+    }
+
+    model_changed = evaluate_entry_context_freshness(
+        {**good_meta, "model_version": "entry-old"},
+        now=now,
+    )
+    schema_changed = evaluate_entry_context_freshness(
+        {**good_meta, "feature_schema_version": "features-old"},
+        now=now,
+    )
+
+    assert model_changed["status"] == "expired"
+    assert model_changed["reason"] == "model_version_changed"
+    assert model_changed["serving_allowed"] is False
+    assert schema_changed["status"] == "expired"
+    assert schema_changed["reason"] == "feature_schema_changed"
+    assert schema_changed["serving_allowed"] is False

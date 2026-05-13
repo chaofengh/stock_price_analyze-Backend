@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from .settings import *
 from .features import *
+from .freshness import (
+    build_entry_context_metadata,
+    evaluate_entry_context_freshness,
+)
 from .decision import evaluate_row_decision
 from .backtest import _empty_backtest_result, _prediction_return_values
 from .quality import (
@@ -307,6 +311,7 @@ def build_entry_decision_context_from_frame(
         "decisions_by_index": decisions_by_index,
         "backtest_1y": backtest_1y,
         "_point_in_time_cache": {},
+        "meta": build_entry_context_metadata(normalized, feature_df, backtest_1y),
     }
 
 
@@ -322,6 +327,7 @@ def build_entry_decision_from_context(
     decisions_by_index = context.get("decisions_by_index")
     backtest_1y = context.get("backtest_1y")
     point_in_time_cache = context.get("_point_in_time_cache")
+    context_meta = context.get("meta")
     if not symbol:
         raise ValueError("Entry decision context is missing a symbol.")
     if feature_df is None or getattr(feature_df, "empty", True):
@@ -340,6 +346,7 @@ def build_entry_decision_from_context(
         decisions_by_index=decisions_by_index,
         backtest_1y=backtest_1y,
         point_in_time_cache=point_in_time_cache,
+        context_meta=context_meta,
     )
 
 
@@ -400,7 +407,7 @@ def _get_entry_feature_context_cached(symbol: str, cache_day: str) -> tuple[str,
 
 
 @lru_cache(maxsize=_ENTRY_CONTEXT_CACHE_SIZE)
-def _get_entry_context_cached(symbol: str, cache_day: str) -> tuple[str, pd.DataFrame, dict[int, dict], dict, dict]:
+def _get_entry_context_cached(symbol: str, cache_day: str) -> tuple[str, pd.DataFrame, dict[int, dict], dict, dict, dict]:
     resolved_symbol, feature_df, point_in_time_cache = _get_entry_feature_context_cached(
         symbol,
         cache_day,
@@ -409,7 +416,8 @@ def _get_entry_context_cached(symbol: str, cache_day: str) -> tuple[str, pd.Data
         feature_df,
         force_latest_prediction=True,
     )
-    return resolved_symbol or symbol, feature_df, decisions_by_index, backtest_1y, point_in_time_cache
+    context_meta = build_entry_context_metadata(symbol, feature_df, backtest_1y)
+    return resolved_symbol or symbol, feature_df, decisions_by_index, backtest_1y, point_in_time_cache, context_meta
 
 
 def _build_payload_from_context(
@@ -420,6 +428,7 @@ def _build_payload_from_context(
     decisions_by_index: dict[int, dict],
     backtest_1y: dict,
     point_in_time_cache: dict[int, dict] | None = None,
+    context_meta: dict | None = None,
 ) -> dict:
     parsed_as_of_date = _parse_as_of_date(as_of_date)
     resolved_idx, date_was_snapped = _resolve_as_of_index(feature_df, parsed_as_of_date)
@@ -445,6 +454,7 @@ def _build_payload_from_context(
         selected_decision=selected_decision,
     )
 
+    context_meta = context_meta or build_entry_context_metadata(symbol, feature_df, backtest_1y)
     return {
         "symbol": symbol,
         "requested_as_of_date": _to_date_string(parsed_as_of_date),
@@ -463,6 +473,12 @@ def _build_payload_from_context(
         "top_reasons": selected_decision["top_reasons"],
         "backtest_1y": scoped_backtest_1y,
         "chart_data": _build_entry_chart_data(scoped_feature_df),
+        "meta": {
+            "full_decision_preloaded": True,
+            "context": deepcopy(context_meta),
+            "freshness": evaluate_entry_context_freshness(context_meta),
+            "quality": deepcopy(context_meta.get("quality", {})),
+        },
     }
 
 
@@ -480,7 +496,7 @@ def get_entry_decision_context(symbol: str) -> dict:
     if not normalized:
         raise ValueError("Missing symbol for entry decision")
 
-    _, feature_df, decisions_by_index, backtest_1y, point_in_time_cache = _get_entry_context_cached(
+    _, feature_df, decisions_by_index, backtest_1y, point_in_time_cache, context_meta = _get_entry_context_cached(
         normalized,
         _entry_cache_day(),
     )
@@ -490,6 +506,7 @@ def get_entry_decision_context(symbol: str) -> dict:
         "decisions_by_index": decisions_by_index,
         "backtest_1y": backtest_1y,
         "_point_in_time_cache": point_in_time_cache,
+        "meta": context_meta,
     }
 
 

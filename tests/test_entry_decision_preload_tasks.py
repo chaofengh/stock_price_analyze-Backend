@@ -3,6 +3,7 @@ import time
 from datetime import datetime
 from unittest.mock import call, patch
 
+import analysis.trade_entry_evaluation as tee
 import tasks.daily_scan_tasks as daily_scan_tasks
 import tasks.entry_decision_preload_tasks as preload_tasks
 
@@ -17,6 +18,18 @@ def teardown_function():
     daily_scan_tasks._reset_scan_state_for_tests()
     preload_tasks._reset_entry_decision_preload_state_for_tests()
     os.environ.pop("ENTRY_DECISION_PRELOAD_MARKET_HOURS_ONLY", None)
+
+
+def _entry_context_meta(symbol: str = "AMD", *, price_data_end_date: str = "2099-01-01") -> dict:
+    return {
+        "symbol": symbol,
+        "model_version": tee.entry_decision_model_version(),
+        "feature_schema_version": tee.entry_decision_feature_schema_version(),
+        "price_data_end_date": price_data_end_date,
+        "trained_through_date": price_data_end_date,
+        "context_key": f"{symbol}-{price_data_end_date}",
+        "quality": {"status": "passed"},
+    }
 
 
 def test_alert_symbols_from_payload_normalizes_and_dedupes():
@@ -564,6 +577,96 @@ def test_preloaded_context_renders_selected_date_without_new_worker_payload():
 
     assert payload["requested_as_of_date"] == "2026-04-10"
     mock_build_payload.assert_called_once_with(context, as_of_date="2026-04-10")
+
+
+def test_preloaded_fresh_context_renders_selected_date_without_new_worker_payload():
+    context = {
+        "symbol": "AMD",
+        "feature_df": object(),
+        "decisions_by_index": {},
+        "backtest_1y": {},
+        "meta": _entry_context_meta("AMD"),
+    }
+
+    with (
+        patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
+        patch(
+            "tasks.entry_decision_preload_tasks.build_entry_decision_from_context",
+            return_value={
+                "symbol": "AMD",
+                "requested_as_of_date": "2026-04-10",
+                "as_of_date": "2026-04-10",
+                "horizons": {},
+                "backtest_1y": {},
+                "chart_data": [],
+            },
+        ) as mock_build_payload,
+        patch("tasks.entry_decision_preload_tasks._start_preload_worker") as mock_start,
+    ):
+        assert preload_tasks.store_entry_decision_context("AMD", context)
+        payload = preload_tasks.get_preloaded_entry_decision("AMD", as_of_date="2026-04-10", full_only=True)
+
+    assert payload["requested_as_of_date"] == "2026-04-10"
+    mock_build_payload.assert_called_once_with(context, as_of_date="2026-04-10")
+    mock_start.assert_not_called()
+
+
+def test_expired_context_cache_is_not_used_for_selected_date():
+    context = {
+        "symbol": "AMD",
+        "feature_df": object(),
+        "decisions_by_index": {},
+        "backtest_1y": {},
+        "meta": _entry_context_meta("AMD", price_data_end_date="2024-01-02"),
+    }
+
+    with (
+        patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
+        patch("tasks.entry_decision_preload_tasks.build_entry_decision_from_context") as mock_build_payload,
+    ):
+        assert preload_tasks.store_entry_decision_context("AMD", context)
+        payload = preload_tasks.get_preloaded_entry_decision("AMD", as_of_date="2026-04-10", full_only=True)
+
+    assert payload is None
+    mock_build_payload.assert_not_called()
+
+
+def test_expired_full_payload_cache_is_evicted_and_requeued_for_preload():
+    stale_payload = {
+        "symbol": "AMD",
+        "requested_as_of_date": "2026-04-15",
+        "as_of_date": "2026-04-15",
+        "horizons": {},
+        "backtest_1y": {},
+        "chart_data": [],
+        "meta": {
+            "full_decision_preloaded": True,
+            "context": _entry_context_meta("AMD", price_data_end_date="2024-01-02"),
+        },
+    }
+
+    daily_scan_tasks._store_cached_result(
+        {
+            "timestamp": "2026-04-15 10:05:00",
+            "alerts": [{"symbol": "AMD"}],
+        }
+    )
+
+    with (
+        patch.dict(os.environ, {"ENTRY_DECISION_PRELOAD_FULL_ENABLED": "1"}),
+        patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
+        patch("tasks.entry_decision_preload_tasks._start_preload_worker") as mock_start,
+    ):
+        assert preload_tasks.store_preloaded_entry_decision("AMD", stale_payload, as_of_date="2026-04-15")
+        assert preload_tasks.get_preloaded_entry_decision("AMD", as_of_date="2026-04-15", full_only=True) is None
+
+        result = preload_tasks.preload_entry_decisions_from_latest_alerts(
+            max_symbols=1,
+            min_idle_seconds=0,
+        )
+
+    assert result == {"status": "started", "symbols": ["AMD"]}
+    mock_start.assert_called_once_with(["AMD"], "2026-04-15", source="background")
 
 
 def test_user_alert_payload_queues_all_symbols_when_worker_is_busy():

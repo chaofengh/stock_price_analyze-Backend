@@ -27,7 +27,11 @@ from analysis.data_preparation import prepare_stock_data
 from analysis.trade_entry_evaluation import (
     build_entry_decision_context_from_frame,
     build_entry_decision_from_context,
+    entry_context_serving_allowed,
+    entry_payload_serving_allowed,
+    evaluate_entry_context_freshness,
     get_entry_decision_context,
+    refresh_payload_freshness,
 )
 from utils.serialization import convert_to_python_types
 
@@ -206,6 +210,18 @@ def _payload_is_full_model(payload: dict | None) -> bool:
     return True
 
 
+def _payload_can_be_served(payload: dict | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if not _payload_is_full_model(payload):
+        return False
+    return entry_payload_serving_allowed(payload)
+
+
+def _context_can_be_served(context: dict | None) -> bool:
+    return entry_context_serving_allowed(context)
+
+
 def _cache_day() -> str:
     return datetime.now(_CHICAGO_TZ).strftime("%Y-%m-%d")
 
@@ -323,7 +339,15 @@ def _copy_cached_payload_locked(key: tuple[str, str, str], *, full_only: bool = 
     payload = cached.get("payload")
     if full_only and not _payload_is_full_model(payload):
         return None
-    return copy.deepcopy(cached["payload"])
+    if not entry_payload_serving_allowed(payload):
+        _payload_cache.pop(key, None)
+        _failure_retry_after.pop(key, None)
+        _interactive_failure_retry_after.pop(key, None)
+        _alert_preload_queued.discard(key)
+        _alert_preload_queue[:] = [queued_key for queued_key in _alert_preload_queue if queued_key != key]
+        return None
+    payload_copy = copy.deepcopy(cached["payload"])
+    return refresh_payload_freshness(payload_copy)
 
 
 def get_preloaded_entry_decision(
@@ -339,8 +363,12 @@ def get_preloaded_entry_decision(
         exact_payload = _copy_cached_payload_locked(_cache_key(normalized, as_of_date), full_only=full_only)
         if exact_payload is not None:
             return exact_payload
-        cached_context = _context_cache.get(_context_key(normalized))
+        context_cache_key = _context_key(normalized)
+        cached_context = _context_cache.get(context_cache_key)
         context = cached_context.get("context") if isinstance(cached_context, dict) else None
+        if context is not None and not _context_can_be_served(context):
+            _context_cache.pop(context_cache_key, None)
+            context = None
         if context is None and not as_of_date:
             latest_payload = _copy_cached_payload_locked(_cache_key(normalized, _cache_day()), full_only=full_only)
             if latest_payload is not None:
@@ -364,9 +392,12 @@ def store_entry_decision_context(symbol: str, context: dict) -> bool:
     if not normalized or not isinstance(context, dict):
         return False
     with _state_lock:
+        freshness = evaluate_entry_context_freshness(context.get("meta"))
         _context_cache[_context_key(normalized)] = {
             "context": context,
             "loaded_at": time.time(),
+            "context_key": context.get("meta", {}).get("context_key"),
+            "freshness": freshness,
         }
         _prune_cache_locked()
     return True
@@ -385,8 +416,10 @@ def store_preloaded_entry_decision(
         return False
     key = _cache_key(normalized, as_of_date)
     with _state_lock:
+        payload_to_store = copy.deepcopy(payload)
+        refresh_payload_freshness(payload_to_store)
         _payload_cache[key] = {
-            "payload": copy.deepcopy(payload),
+            "payload": payload_to_store,
             "loaded_at": time.time(),
         }
         _failure_retry_after.pop(key, None)
@@ -411,10 +444,14 @@ def _symbols_needing_preload(
             key = _cache_key(symbol, preload_date)
             if _failure_retry_after.get(key, 0.0) > now:
                 continue
-            if _context_cache.get(_context_key(symbol)) is not None:
-                continue
+            cached_context = _context_cache.get(_context_key(symbol))
+            context = cached_context.get("context") if isinstance(cached_context, dict) else None
+            if context is not None:
+                if _context_can_be_served(context):
+                    continue
+                _context_cache.pop(_context_key(symbol), None)
             cached = _payload_cache.get(key)
-            if cached is None:
+            if cached is None or not _payload_can_be_served(cached.get("payload")):
                 pending.append(symbol)
                 continue
             if full_only and not _payload_is_full_model(cached.get("payload")):
@@ -429,10 +466,14 @@ def _key_needs_full_preload_locked(key: tuple[str, str, str], now: float | None 
     now = time.time() if now is None else now
     if _failure_retry_after.get(key, 0.0) > now:
         return False
-    if _context_cache.get((cache_day, _symbol)) is not None:
-        return False
+    cached_context = _context_cache.get((cache_day, _symbol))
+    context = cached_context.get("context") if isinstance(cached_context, dict) else None
+    if context is not None:
+        if _context_can_be_served(context):
+            return False
+        _context_cache.pop((cache_day, _symbol), None)
     cached = _payload_cache.get(key)
-    if cached is None:
+    if cached is None or not _payload_can_be_served(cached.get("payload")):
         return True
     return not _payload_is_full_model(cached.get("payload"))
 
