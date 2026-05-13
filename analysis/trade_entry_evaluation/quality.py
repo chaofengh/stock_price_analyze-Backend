@@ -265,13 +265,71 @@ def _prediction_book_passes_quality(metrics: dict) -> bool:
     return True
 
 
+def _accuracy_budget_preserved(
+    current_metrics: dict,
+    trial_metrics: dict,
+    *,
+    accuracy_key: str,
+    count_key: str,
+    correct_key: str,
+    min_accuracy: float,
+) -> bool:
+    current = current_metrics.get(accuracy_key)
+    if current is None:
+        return True
+    trial = trial_metrics.get(accuracy_key)
+    if trial is None:
+        return False
+
+    current_accuracy = _safe_num(current, 0.0)
+    trial_accuracy = _safe_num(trial, 0.0)
+    if trial_accuracy < min_accuracy:
+        return False
+    if trial_accuracy + _COVERAGE_EXPANSION_MAX_ACCURACY_DROP + _EPS >= current_accuracy:
+        return True
+
+    current_count = int(_safe_num(current_metrics.get(count_key), 0))
+    trial_count = int(_safe_num(trial_metrics.get(count_key), 0))
+    if current_count <= 0 or trial_count <= current_count:
+        return False
+
+    current_correct = int(_safe_num(current_metrics.get(correct_key), 0))
+    trial_correct = int(_safe_num(trial_metrics.get(correct_key), 0))
+    current_lower = _wilson_lower_bound(current_correct, current_count)
+    trial_lower = _wilson_lower_bound(trial_correct, trial_count)
+    return trial_lower + _EPS >= current_lower
+
+
 def _prediction_book_preserves_accuracy(current_metrics: dict, trial_metrics: dict) -> bool:
-    for key in ("accuracy", "continuation_accuracy", "reversal_accuracy"):
-        current = current_metrics.get(key)
-        if current is None:
-            continue
-        trial = trial_metrics.get(key)
-        if trial is None or _safe_num(trial, 0.0) + _EPS < _safe_num(current, 0.0):
+    checks = (
+        (
+            "accuracy",
+            "prediction_count",
+            "correct_count",
+            _DEPLOY_MIN_BACKTEST_ACCURACY,
+        ),
+        (
+            "continuation_accuracy",
+            "continuation_call_count",
+            "continuation_correct_count",
+            _DEPLOY_MIN_BACKTEST_CONTINUE_ACCURACY,
+        ),
+        (
+            "reversal_accuracy",
+            "reversal_call_count",
+            "reversal_correct_count",
+            _DEPLOY_MIN_BACKTEST_REVERSE_ACCURACY,
+        ),
+    )
+    for accuracy_key, count_key, correct_key, min_accuracy in checks:
+        if not _accuracy_budget_preserved(
+            current_metrics,
+            trial_metrics,
+            accuracy_key=accuracy_key,
+            count_key=count_key,
+            correct_key=correct_key,
+            min_accuracy=min_accuracy,
+        ):
             return False
     return True
 

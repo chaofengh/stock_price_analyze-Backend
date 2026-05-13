@@ -36,6 +36,7 @@ def test_create_scheduler_registers_market_hour_scan_watchlist_and_preload_jobs(
     with (
         patch("app.BackgroundScheduler", return_value=fake_scheduler) as mock_scheduler_cls,
         patch("app.prime_scan_cache") as mock_prime_scan,
+        patch("app.preload_entry_decisions_for_startup_alerts") as mock_startup_preload,
         patch("app.atexit.register") as mock_atexit_register,
     ):
         scheduler = create_scheduler(flask_app)
@@ -43,6 +44,7 @@ def test_create_scheduler_registers_market_hour_scan_watchlist_and_preload_jobs(
     assert scheduler is fake_scheduler
     mock_scheduler_cls.assert_called_once()
     mock_prime_scan.assert_called_once()
+    mock_startup_preload.assert_called_once()
     mock_atexit_register.assert_called_once()
     assert fake_scheduler.started is True
 
@@ -70,3 +72,13 @@ def test_create_scheduler_registers_market_hour_scan_watchlist_and_preload_jobs(
     assert preload_job["minute"] == os.getenv("ENTRY_DECISION_PRELOAD_CRON_MINUTES", "*/2")
     assert preload_job["replace_existing"] is True
     assert preload_job["max_instances"] == 1
+
+    after_close_job = next(
+        job for job in fake_scheduler.jobs if job["id"] == "entry_decision_after_close_preload"
+    )
+    assert after_close_job["trigger"] == "cron"
+    assert after_close_job["day_of_week"] == "mon-fri"
+    assert after_close_job["hour"] == os.getenv("ENTRY_DECISION_AFTER_CLOSE_PRELOAD_CRON_HOUR", "15")
+    assert after_close_job["minute"] == os.getenv("ENTRY_DECISION_AFTER_CLOSE_PRELOAD_CRON_MINUTE", "10")
+    assert after_close_job["replace_existing"] is True
+    assert after_close_job["max_instances"] == 1

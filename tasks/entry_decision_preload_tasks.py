@@ -63,6 +63,7 @@ DEFAULT_CLOSE_CUTOFF_MINUTES = max(
 _MAX_CACHE_ENTRIES = max(1, int(os.getenv("ENTRY_DECISION_PRELOAD_CACHE_SIZE", "128")))
 _CONTEXT_SYMBOLS = ("QQQ", "XLK")
 _TRAINING_HISTORY_PERIOD = "2y"
+_RESOURCE_CAPPED_WORKER_SOURCES = {"startup", "after_close"}
 
 _state_lock = threading.Lock()
 _preload_lock = threading.Lock()
@@ -89,6 +90,48 @@ def _full_preload_enabled() -> bool:
     if raw is None:
         return True
     return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.getenv(name, str(default))).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _startup_alert_preload_max_symbols() -> int:
+    return _env_int("ENTRY_DECISION_STARTUP_ALERT_PRELOAD_MAX_SYMBOLS", -1)
+
+
+def _after_close_alert_preload_max_symbols() -> int:
+    return _env_int("ENTRY_DECISION_AFTER_CLOSE_ALERT_PRELOAD_MAX_SYMBOLS", -1)
+
+
+def _batch_size_for_pending(pending: list[str], max_symbols: int | None) -> int:
+    if max_symbols is None:
+        return DEFAULT_BATCH_SIZE
+    if max_symbols < 0:
+        return len(pending)
+    return max_symbols
+
+
+def _resource_capped_worker_batch_size() -> int:
+    return max(
+        1,
+        _env_int("ENTRY_DECISION_RESOURCE_CAPPED_PRELOAD_BATCH_SIZE", DEFAULT_BATCH_SIZE),
+    )
+
+
+def _resource_capped_worker_pause_seconds() -> float:
+    raw = os.getenv("ENTRY_DECISION_RESOURCE_CAPPED_PRELOAD_PAUSE_SECONDS", "0.5")
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def _preload_worker_nice_increment() -> int:
+    return max(0, _env_int("ENTRY_DECISION_BACKGROUND_PRELOAD_NICE", 10))
 
 
 def _auto_preload_market_hours_only() -> bool:
@@ -305,7 +348,6 @@ def alert_symbols_from_payload(payload: dict | None) -> list[str]:
         if symbol:
             symbols.append(symbol)
     return _normalize_symbols(symbols)
-
 
 def mark_backend_request_started() -> None:
     global _active_requests, _last_request_activity_at
@@ -536,8 +578,14 @@ def _queue_alert_preload_symbols(
 
 
 def _next_queued_alert_batch(max_symbols: int | None = None) -> tuple[list[str], str] | None:
-    batch_limit = DEFAULT_BATCH_SIZE if max_symbols is None else max(0, max_symbols)
-    if batch_limit <= 0:
+    batch_limit: int | None
+    if max_symbols is None:
+        batch_limit = DEFAULT_BATCH_SIZE
+    elif max_symbols < 0:
+        batch_limit = None
+    else:
+        batch_limit = max_symbols
+    if batch_limit == 0:
         return None
 
     now = time.time()
@@ -561,7 +609,8 @@ def _next_queued_alert_batch(max_symbols: int | None = None) -> tuple[list[str],
                 selected_as_of_date = as_of_date
 
             same_batch = cache_day == selected_cache_day and as_of_date == selected_as_of_date
-            if same_batch and len(selected_symbols) < batch_limit:
+            under_limit = batch_limit is None or len(selected_symbols) < batch_limit
+            if same_batch and under_limit:
                 selected_symbols.append(symbol)
                 continue
 
@@ -666,8 +715,9 @@ def _compute_preload_artifacts(
     """
     Build preload payloads and reusable model contexts from one batched OHLC download.
 
-    This deliberately avoids the request path's single-ticker history fallback and
-    earnings-date lookup. Those Yahoo calls are where crumb failures tend to hang.
+    This deliberately avoids the request path's single-ticker history fallback,
+    but it still resolves earnings dates. Alert preloads are user-visible model
+    output, so they must honor the same event-risk blackout as interactive calls.
     """
     loaded: dict[str, dict] = {}
     contexts: dict[str, dict] = {}
@@ -717,7 +767,7 @@ def _compute_preload_artifacts(
             context = build_entry_decision_context_from_frame(
                 symbol,
                 frame,
-                earnings_dates=set(),
+                earnings_dates=None,
                 earnings_symbol=resolved_symbol or symbol,
                 context_frames=context_frames,
             )
@@ -732,6 +782,46 @@ def _compute_preload_artifacts(
 def _compute_preload_payloads(symbols: list[str], as_of_date: str) -> tuple[dict[str, dict], dict[str, str]]:
     loaded, _contexts, failed = _compute_preload_artifacts(symbols, as_of_date)
     return loaded, failed
+
+
+def _merge_preload_results(
+    target_loaded: dict[str, dict],
+    target_contexts: dict[str, dict],
+    target_failed: dict[str, str],
+    loaded: dict[str, dict],
+    contexts: dict[str, dict],
+    failed: dict[str, str],
+) -> None:
+    target_loaded.update(loaded)
+    target_contexts.update(contexts)
+    for symbol, error in failed.items():
+        if symbol == "__global__" and symbol in target_failed:
+            target_failed[symbol] = f"{target_failed[symbol]}; {error}"
+        else:
+            target_failed[symbol] = error
+
+
+def _compute_resource_capped_preload_artifacts(
+    symbols: list[str],
+    as_of_date: str,
+) -> tuple[dict[str, dict], dict[str, dict], dict[str, str]]:
+    loaded: dict[str, dict] = {}
+    contexts: dict[str, dict] = {}
+    failed: dict[str, str] = {}
+    batch_size = _resource_capped_worker_batch_size()
+    pause_seconds = _resource_capped_worker_pause_seconds()
+
+    for start in range(0, len(symbols), batch_size):
+        batch_symbols = symbols[start : start + batch_size]
+        batch_loaded, batch_contexts, batch_failed = _compute_preload_artifacts(
+            batch_symbols,
+            as_of_date,
+        )
+        _merge_preload_results(loaded, contexts, failed, batch_loaded, batch_contexts, batch_failed)
+        if pause_seconds > 0 and start + batch_size < len(symbols):
+            time.sleep(pause_seconds)
+
+    return loaded, contexts, failed
 
 
 def _compute_interactive_artifacts(
@@ -761,6 +851,18 @@ def _compute_interactive_payloads(symbols: list[str], as_of_date: str) -> tuple[
     return loaded, failed
 
 
+def _apply_preload_worker_resource_limits(source: str) -> None:
+    if source not in _RESOURCE_CAPPED_WORKER_SOURCES:
+        return
+    nice_increment = _preload_worker_nice_increment()
+    if nice_increment <= 0:
+        return
+    try:
+        os.nice(nice_increment)
+    except OSError:
+        logger.debug("Entry Decision preload worker priority could not be lowered.", exc_info=True)
+
+
 def _child_compute_preload_payloads(result_path: str, symbols: list[str], as_of_date: str, source: str) -> None:
     with (
         open(os.devnull, "w") as devnull,
@@ -768,8 +870,11 @@ def _child_compute_preload_payloads(result_path: str, symbols: list[str], as_of_
         contextlib.redirect_stderr(devnull),
     ):
         try:
+            _apply_preload_worker_resource_limits(source)
             if source in ("interactive", "alert"):
                 loaded, contexts, failed = _compute_interactive_artifacts(symbols, as_of_date)
+            elif source in _RESOURCE_CAPPED_WORKER_SOURCES:
+                loaded, contexts, failed = _compute_resource_capped_preload_artifacts(symbols, as_of_date)
             else:
                 loaded, contexts, failed = _compute_preload_artifacts(symbols, as_of_date)
         except Exception as exc:  # pragma: no cover - defensive child-process guard
@@ -872,7 +977,7 @@ def _store_worker_results(
         store_preloaded_entry_decision(symbol, payload, as_of_date=as_of_date)
         loaded.append(symbol)
 
-    if source == "background" and "__global__" in failed:
+    if source in ("background", "startup", "after_close") and "__global__" in failed:
         _mark_global_preload_failed()
     failed.pop("__global__", None)
     for symbol in failed:
@@ -1079,6 +1184,8 @@ def preload_entry_decisions_from_latest_alerts(
     max_symbols: int | None = None,
     min_idle_seconds: float | None = None,
     timeout_seconds: float | None = None,
+    respect_market_gate: bool = True,
+    source: str = "background",
 ) -> dict:
     """
     Warm the latest Entry Decision payload cache for current Bollinger alert symbols.
@@ -1091,7 +1198,11 @@ def preload_entry_decisions_from_latest_alerts(
         return {"status": "skipped", "reason": "preload_coordinator_busy"}
 
     try:
-        market_gate = _auto_preload_market_gate()
+        market_gate = (
+            _auto_preload_market_gate()
+            if respect_market_gate
+            else {"allowed": True, "reason": "market_gate_bypassed"}
+        )
         terminated_worker = None
         if not market_gate.get("allowed", False):
             terminated_worker = _terminate_noninteractive_worker_for_market_gate(
@@ -1133,7 +1244,7 @@ def preload_entry_decisions_from_latest_alerts(
         result = _preload_entry_decisions_from_alert_payload_locked(
             alert_payload,
             max_symbols=max_symbols,
-            source="background",
+            source=source,
             as_of_date=background_as_of_date,
         )
         if worker_result is not None and result.get("status") in ("ready", "skipped"):
@@ -1143,6 +1254,24 @@ def preload_entry_decisions_from_latest_alerts(
         return result
     finally:
         _preload_lock.release()
+
+
+def preload_entry_decisions_for_startup_alerts() -> dict:
+    return preload_entry_decisions_from_latest_alerts(
+        max_symbols=_startup_alert_preload_max_symbols(),
+        min_idle_seconds=0,
+        respect_market_gate=False,
+        source="startup",
+    )
+
+
+def refresh_entry_decisions_for_latest_alerts_after_close() -> dict:
+    return preload_entry_decisions_from_latest_alerts(
+        max_symbols=_after_close_alert_preload_max_symbols(),
+        min_idle_seconds=0,
+        respect_market_gate=False,
+        source="after_close",
+    )
 
 
 def _preload_entry_decisions_from_alert_payload_locked(
@@ -1165,7 +1294,7 @@ def _preload_entry_decisions_from_alert_payload_locked(
     if not pending:
         return {"status": "ready", "loaded": 0, "symbols": symbols}
 
-    batch_size = DEFAULT_BATCH_SIZE if max_symbols is None else max(0, max_symbols)
+    batch_size = _batch_size_for_pending(pending, max_symbols)
     if batch_size <= 0:
         return {"status": "skipped", "reason": "batch_size_zero", "symbols": pending}
 

@@ -25,7 +25,9 @@ from tasks.watchlist_cache_tasks import refresh_watchlist_cache
 from tasks.entry_decision_preload_tasks import (
     mark_backend_request_finished,
     mark_backend_request_started,
+    preload_entry_decisions_for_startup_alerts,
     preload_entry_decisions_from_latest_alerts,
+    refresh_entry_decisions_for_latest_alerts_after_close,
 )
 
 _REQUEST_ACTIVITY_EXCLUDED_PATHS = {
@@ -117,6 +119,16 @@ def create_scheduler(app: Flask):
         replace_existing=True,
         max_instances=1,
     )
+    scheduler.add_job(
+        refresh_entry_decisions_for_latest_alerts_after_close,
+        trigger="cron",
+        id="entry_decision_after_close_preload",
+        day_of_week="mon-fri",
+        hour=os.getenv("ENTRY_DECISION_AFTER_CLOSE_PRELOAD_CRON_HOUR", "15"),
+        minute=os.getenv("ENTRY_DECISION_AFTER_CLOSE_PRELOAD_CRON_MINUTE", "10"),
+        replace_existing=True,
+        max_instances=1,
+    )
 
     def _log(event):
         if event.exception:
@@ -128,6 +140,11 @@ def create_scheduler(app: Flask):
         prime_scan_cache()
     except Exception as exc:  # pragma: no cover - defensive guard
         app.logger.error("Startup scan prime failed: %s", exc)
+    else:
+        try:
+            preload_entry_decisions_for_startup_alerts()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            app.logger.error("Startup Entry Decision alert preload failed: %s", exc)
 
     scheduler.add_listener(_log, events.EVENT_JOB_EXECUTED | events.EVENT_JOB_ERROR)
     scheduler.start()

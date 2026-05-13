@@ -376,7 +376,7 @@ def test_preload_uses_batched_price_data_without_request_compute_path():
     assert mock_prepare.call_args.kwargs["period"] == "2y"
     assert mock_prepare.call_args.kwargs["threads"] is False
     mock_build_context.assert_called_once()
-    assert mock_build_context.call_args.kwargs["earnings_dates"] == set()
+    assert mock_build_context.call_args.kwargs["earnings_dates"] is None
     assert set(mock_build_context.call_args.kwargs["context_frames"].keys()) == {"QQQ", "XLK"}
     mock_build_payload.assert_called_once_with(context, as_of_date="2026-04-15")
 
@@ -448,6 +448,110 @@ def test_preload_scheduler_default_batch_warms_two_alert_symbols():
 
     assert result == {"status": "started", "symbols": ["AMD", "MU"]}
     mock_start.assert_called_once_with(["AMD", "MU"], "2026-04-15", source="background")
+
+
+def test_after_close_preload_bypasses_market_gate_and_warms_all_alert_symbols():
+    daily_scan_tasks._store_cached_result(
+        {
+            "timestamp": "2026-04-15 15:10:00",
+            "alerts": [{"symbol": "AMD"}, {"symbol": "MU"}, {"symbol": "AAPL"}],
+        }
+    )
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "ENTRY_DECISION_PRELOAD_FULL_ENABLED": "1",
+                "ENTRY_DECISION_PRELOAD_MARKET_HOURS_ONLY": "1",
+            },
+        ),
+        patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
+        patch("tasks.entry_decision_preload_tasks._auto_preload_market_gate") as mock_gate,
+        patch("tasks.entry_decision_preload_tasks._start_preload_worker") as mock_start,
+    ):
+        result = preload_tasks.refresh_entry_decisions_for_latest_alerts_after_close()
+
+    assert result == {"status": "started", "symbols": ["AMD", "MU", "AAPL"]}
+    mock_gate.assert_not_called()
+    mock_start.assert_called_once_with(["AMD", "MU", "AAPL"], "2026-04-15", source="after_close")
+
+
+def test_startup_preload_bypasses_market_gate_and_warms_all_alert_symbols():
+    daily_scan_tasks._store_cached_result(
+        {
+            "timestamp": "2026-04-15 07:00:00",
+            "alerts": [{"symbol": "AMD"}, {"symbol": "MU"}],
+        }
+    )
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "ENTRY_DECISION_PRELOAD_FULL_ENABLED": "1",
+                "ENTRY_DECISION_PRELOAD_MARKET_HOURS_ONLY": "1",
+            },
+        ),
+        patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
+        patch("tasks.entry_decision_preload_tasks._auto_preload_market_gate") as mock_gate,
+        patch("tasks.entry_decision_preload_tasks._start_preload_worker") as mock_start,
+    ):
+        result = preload_tasks.preload_entry_decisions_for_startup_alerts()
+
+    assert result == {"status": "started", "symbols": ["AMD", "MU"]}
+    mock_gate.assert_not_called()
+    mock_start.assert_called_once_with(["AMD", "MU"], "2026-04-15", source="startup")
+
+
+def test_resource_capped_preload_artifacts_chunks_work_and_pauses_between_batches():
+    def fake_compute(symbols, as_of_date):
+        return (
+            {symbol: {"symbol": symbol} for symbol in symbols},
+            {symbol: {"context": symbol} for symbol in symbols},
+            {},
+        )
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "ENTRY_DECISION_RESOURCE_CAPPED_PRELOAD_BATCH_SIZE": "2",
+                "ENTRY_DECISION_RESOURCE_CAPPED_PRELOAD_PAUSE_SECONDS": "0.01",
+            },
+        ),
+        patch(
+            "tasks.entry_decision_preload_tasks._compute_preload_artifacts",
+            side_effect=fake_compute,
+        ) as mock_compute,
+        patch("tasks.entry_decision_preload_tasks.time.sleep") as mock_sleep,
+    ):
+        loaded, contexts, failed = preload_tasks._compute_resource_capped_preload_artifacts(
+            ["AMD", "MU", "AAPL", "NVDA", "MSFT"],
+            "2026-04-15",
+        )
+
+    assert failed == {}
+    assert list(loaded) == ["AMD", "MU", "AAPL", "NVDA", "MSFT"]
+    assert list(contexts) == ["AMD", "MU", "AAPL", "NVDA", "MSFT"]
+    assert mock_compute.call_args_list == [
+        call(["AMD", "MU"], "2026-04-15"),
+        call(["AAPL", "NVDA"], "2026-04-15"),
+        call(["MSFT"], "2026-04-15"),
+    ]
+    assert mock_sleep.call_args_list == [call(0.01), call(0.01)]
+
+
+def test_startup_and_after_close_workers_lower_process_priority():
+    with (
+        patch.dict(os.environ, {"ENTRY_DECISION_BACKGROUND_PRELOAD_NICE": "7"}),
+        patch("tasks.entry_decision_preload_tasks.os.nice") as mock_nice,
+    ):
+        preload_tasks._apply_preload_worker_resource_limits("startup")
+        preload_tasks._apply_preload_worker_resource_limits("after_close")
+        preload_tasks._apply_preload_worker_resource_limits("background")
+
+    assert mock_nice.call_args_list == [call(7), call(7)]
 
 
 def test_user_alert_payload_preload_starts_robust_alert_worker_immediately():

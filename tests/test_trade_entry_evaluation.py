@@ -1,4 +1,6 @@
 from datetime import datetime
+import logging
+import sys
 
 import numpy as np
 import pandas as pd
@@ -14,6 +16,9 @@ from analysis.trade_entry_evaluation import (
     _deployment_quality_gate,
     _finalize_deployment_quality,
     _prepare_feature_frame,
+    _prediction_book_metrics,
+    _prediction_book_preserves_accuracy,
+    _quiet_yfinance_earnings_lookup,
     _reversal_veto_reason,
     build_entry_decision_from_context,
     build_entry_decision_context_from_frame,
@@ -103,6 +108,7 @@ def _manual_decision(h5, h10):
         "touched_side": "Upper",
         "setup_type": "upper_band_touch",
         "event_risk_blocked": False,
+        "event_risk": {"blocked": False},
         "horizons": {
             "5d": h5,
             "10d": h10,
@@ -125,6 +131,10 @@ def _minimal_feature_context_frame() -> pd.DataFrame:
             "ATR14": [2.0, 2.0, 2.0],
             "touched_side": [None, "Upper", None],
             "event_risk_blocked": [False, False, False],
+            "event_risk_event_date": [None, None, None],
+            "event_risk_sessions_to_event": [pd.NA, pd.NA, pd.NA],
+            "event_risk_calendar_days_to_event": [pd.NA, pd.NA, pd.NA],
+            "event_risk_reason": [None, None, None],
         }
     )
 
@@ -839,7 +849,7 @@ def test_coverage_expansion_maximizes_safe_calls_when_accuracy_is_preserved():
     assert signals["reversal:weak_reversal"]["deployment_enabled"] is False
 
 
-def test_coverage_expansion_does_not_trade_accuracy_for_more_calls():
+def test_coverage_expansion_accepts_bounded_accuracy_drop_for_material_coverage_gain():
     actual_by_index = {
         0: "continuation",
         6: "continuation",
@@ -882,17 +892,52 @@ def test_coverage_expansion_does_not_trade_accuracy_for_more_calls():
 
     assert "coverage_target" not in five_day
     assert five_day["coverage_policy"] == "max_safe_accuracy_preserving"
-    assert five_day["coverage"] == 0.8
-    assert five_day["max_safe_coverage"] == 0.8
-    assert five_day["prediction_count"] == 8
-    assert five_day["max_safe_prediction_count"] == 8
-    assert five_day["accuracy"] == 1.0
+    assert five_day["coverage"] == 1.0
+    assert five_day["max_safe_coverage"] == 1.0
+    assert five_day["prediction_count"] == 10
+    assert five_day["max_safe_prediction_count"] == 10
+    assert five_day["accuracy"] == 0.9
     assert five_day["raw_prediction_count"] == 5
     assert five_day["raw_accuracy"] == 0.8
     assert five_day["coverage_expansion_signal_count"] == 0
-    assert five_day["coverage_repair_prediction_count"] == 5
+    assert five_day["coverage_repair_prediction_count"] == 7
     assert weak_signal["deployment_enabled"] is False
     assert weak_signal.get("coverage_expansion") is None
+
+
+def test_coverage_expansion_accepts_more_calls_when_wilson_confidence_improves():
+    current_rows = [
+        {"predicted_direction": "continuation", "is_correct": True}
+        for _ in range(5)
+    ]
+    trial_rows = current_rows + [
+        {"predicted_direction": "continuation", "is_correct": True}
+        for _ in range(25)
+    ] + [
+        {"predicted_direction": "continuation", "is_correct": False}
+        for _ in range(2)
+    ]
+
+    current_metrics = _prediction_book_metrics(current_rows)
+    trial_metrics = _prediction_book_metrics(trial_rows)
+
+    assert trial_metrics["accuracy"] < current_metrics["accuracy"]
+    assert _prediction_book_preserves_accuracy(current_metrics, trial_metrics) is True
+
+
+def test_coverage_expansion_rejects_more_calls_when_accuracy_budget_is_not_preserved():
+    current_rows = [
+        {"predicted_direction": "continuation", "is_correct": True}
+        for _ in range(8)
+    ]
+    trial_rows = current_rows + [
+        {"predicted_direction": "continuation", "is_correct": False}
+    ]
+
+    assert _prediction_book_preserves_accuracy(
+        _prediction_book_metrics(current_rows),
+        _prediction_book_metrics(trial_rows),
+    ) is False
 
 
 def test_expanding_percentiles_do_not_use_future_rows():
@@ -935,6 +980,83 @@ def test_expanded_model_feature_frame_contains_ta_inputs():
     ]
     for column in advanced_columns:
         assert feature_df[column].notna().any()
+
+
+def test_earnings_blackout_blocks_mu_entry_when_earnings_falls_inside_prediction_horizon():
+    frame = _base_frame(420)
+    feature_df = _prepare_feature_frame(
+        frame,
+        symbol="MU",
+        earnings_dates={pd.Timestamp("2026-03-18")},
+    )
+
+    dates = pd.DatetimeIndex(pd.to_datetime(feature_df["date"])).normalize()
+    blocked_idx = int(np.flatnonzero(dates == pd.Timestamp("2026-03-16"))[0])
+    safe_idx = int(np.flatnonzero(dates == pd.Timestamp("2026-03-02"))[0])
+
+    assert bool(feature_df.iloc[blocked_idx]["event_risk_blocked"]) is True
+    assert bool(feature_df.iloc[safe_idx]["event_risk_blocked"]) is False
+    assert feature_df.iloc[blocked_idx]["event_risk_event_date"] == "2026-03-18"
+    assert feature_df.iloc[blocked_idx]["event_risk_reason"] == "earnings_within_prediction_window"
+
+    decision = evaluate_row_decision(
+        feature_df.iloc[blocked_idx],
+        feature_df=feature_df,
+        row_index=blocked_idx,
+    )
+
+    assert decision["event_risk_blocked"] is True
+    assert decision["event_risk"]["event_date"] == "2026-03-18"
+    assert decision["event_risk"]["blocked_horizons"] == ["5d", "10d"]
+    assert decision["horizons"]["5d"]["status"] == "no_prediction"
+    assert decision["horizons"]["5d"]["no_prediction_reason"] == "event_risk"
+    assert decision["horizons"]["5d"]["event_risk"]["reason"] == "earnings_within_prediction_window"
+
+
+def test_earnings_blackout_is_horizon_specific_to_preserve_safe_coverage():
+    frame = _base_frame(420)
+    target_date = pd.Timestamp("2026-03-09")
+    target_pos = int(np.flatnonzero(pd.DatetimeIndex(frame["date"]).normalize() == target_date)[0])
+    target_label = frame.index[target_pos]
+    lower = float(frame.loc[target_label, "BB_lower"])
+    frame.loc[target_label, "low"] = lower - 1.0
+    frame.loc[target_label, "close"] = lower + 0.08
+    frame.loc[target_label, "open"] = lower + 0.10
+    frame.loc[target_label, "high"] = lower + 0.7
+
+    feature_df = _prepare_feature_frame(
+        frame,
+        symbol="MU",
+        earnings_dates={pd.Timestamp("2026-03-18")},
+    )
+    target_idx = int(np.flatnonzero(pd.DatetimeIndex(feature_df["date"]).normalize() == target_date)[0])
+
+    decision = evaluate_row_decision(
+        feature_df.iloc[target_idx],
+        feature_df=feature_df,
+        row_index=target_idx,
+    )
+
+    assert decision["event_risk_blocked"] is True
+    assert decision["event_risk"]["blocked_horizons"] == ["10d"]
+    assert decision["horizons"]["5d"]["event_risk"]["blocked"] is False
+    assert decision["horizons"]["5d"].get("no_prediction_reason") != "event_risk"
+    assert decision["horizons"]["10d"]["status"] == "no_prediction"
+    assert decision["horizons"]["10d"]["no_prediction_reason"] == "event_risk"
+    assert decision["horizons"]["10d"]["event_risk"]["blocked"] is True
+
+
+def test_yfinance_earnings_lookup_noise_is_suppressed(capsys):
+    logger = logging.getLogger("yfinance")
+
+    with _quiet_yfinance_earnings_lookup():
+        print("HTTP Error 401: invalid crumb")
+        sys.stderr.write("HTTP Error 401: invalid crumb\n")
+        logger.error("HTTP Error 401: invalid crumb")
+
+    captured = capsys.readouterr()
+    assert "HTTP Error 401" not in captured.out
+    assert "HTTP Error 401" not in captured.err
 
 
 def test_as_of_date_exact_trading_day_uses_same_date():
@@ -1010,8 +1132,13 @@ def test_latest_payload_keeps_prior_open_prediction_marker(monkeypatch):
     assert payload["as_of_date"] == "2026-05-07"
     assert len(open_predictions) == 1
     assert open_predictions[0]["signal_date"] == "2026-05-06"
+    assert open_predictions[0]["current_date"] == "2026-05-07"
     assert open_predictions[0]["status"] == "open"
     assert open_predictions[0]["predicted_direction"] == "reversal"
+    assert open_predictions[0]["elapsed_sessions"] == 1
+    assert open_predictions[0]["remaining_sessions"] == 9
+    assert open_predictions[0]["current_close"] == 102.5
+    assert open_predictions[0]["interim_status"] == "working"
 
 
 def test_as_of_date_weekend_snaps_to_previous_trading_day():

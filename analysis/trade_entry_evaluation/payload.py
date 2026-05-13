@@ -149,29 +149,65 @@ def _open_prediction_row(
     horizon_decision: dict,
 ) -> dict:
     row = feature_df.iloc[idx]
+    current_row = feature_df.iloc[-1]
     signal_close = _safe_num(row.get("close"), np.nan)
+    current_close = _safe_num(current_row.get("close"), np.nan)
     atr = _safe_num(row.get("ATR14"), np.nan)
+    elapsed_sessions = max(0, len(feature_df) - 1 - idx)
+    remaining_sessions = max(0, horizon - elapsed_sessions)
+    progress = _clamp(elapsed_sessions / horizon, 0.0, 1.0) if horizon > 0 else 0.0
+    flat_tolerance = _flat_tolerance_for_row(row)
+    interim_direction = (
+        _actual_direction(row.get("touched_side"), signal_close, current_close, flat_tolerance)
+        if np.isfinite(signal_close) and np.isfinite(current_close)
+        else None
+    )
+    predicted_direction = horizon_decision.get("predicted_direction")
+    if interim_direction == "flat":
+        interim_status = "flat"
+    elif interim_direction in ("continuation", "reversal") and predicted_direction == interim_direction:
+        interim_status = "working"
+    elif interim_direction in ("continuation", "reversal"):
+        interim_status = "against"
+    else:
+        interim_status = "unknown"
+    current_return_values = _prediction_return_values(
+        row.get("touched_side"),
+        predicted_direction,
+        signal_close,
+        current_close,
+        atr,
+    )
     playbook = horizon_decision.get("playbook") or {}
     return {
         "status": "open",
         "signal_date": _to_date_string(row.get("date")),
+        "current_date": _to_date_string(current_row.get("date")),
         "outcome_date": None,
         "horizon_days": horizon,
+        "elapsed_sessions": elapsed_sessions,
+        "remaining_sessions": remaining_sessions,
+        "progress": round(float(progress), 6),
         "touched_side": row.get("touched_side"),
-        "predicted_direction": horizon_decision.get("predicted_direction"),
+        "predicted_direction": predicted_direction,
+        "interim_direction": interim_direction,
+        "interim_status": interim_status,
         "actual_direction": None,
         "signal_close": round(signal_close, 6) if np.isfinite(signal_close) else None,
+        "current_close": round(current_close, 6) if np.isfinite(current_close) else None,
         "outcome_close": None,
         "continuation_hurdle": round(_continuation_hurdle_for_row(row), 6),
-        "flat_tolerance": round(_flat_tolerance_for_row(row), 6),
+        "flat_tolerance": round(flat_tolerance, 6),
         "is_correct": None,
         "trade_direction": _prediction_return_values(
             row.get("touched_side"),
-            horizon_decision.get("predicted_direction"),
+            predicted_direction,
             signal_close,
             signal_close,
             atr,
         ).get("trade_direction"),
+        "current_trade_return": current_return_values.get("trade_return"),
+        "current_trade_return_atr": current_return_values.get("trade_return_atr"),
         "trade_return": None,
         "trade_return_atr": None,
         "continuation_probability": horizon_decision.get("continuation_probability"),
@@ -463,6 +499,7 @@ def _build_payload_from_context(
         "touched_side": selected_decision["touched_side"],
         "setup_type": selected_decision["setup_type"],
         "event_risk_blocked": selected_decision.get("event_risk_blocked", False),
+        "event_risk": deepcopy(selected_decision.get("event_risk") or {}),
         "prediction_threshold": _PREDICTION_THRESHOLD,
         "deployment_thresholds": {
             "continuation": _CONTINUATION_DEPLOYMENT_THRESHOLD,

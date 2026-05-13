@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import contextlib
+import logging
+import os
+
 from .settings import *
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -227,13 +231,19 @@ def _rolling_zscore(series: pd.Series, window: int, min_periods: int) -> pd.Seri
     return (series - mean) / (std + _EPS)
 
 
-@lru_cache(maxsize=256)
-def _cached_earnings_dates(symbol: str) -> tuple[pd.Timestamp, ...]:
+def _earnings_cache_day() -> str:
+    return pd.Timestamp.now(tz="America/Chicago").strftime("%Y-%m-%d")
+
+
+@lru_cache(maxsize=512)
+def _cached_earnings_dates(symbol: str, cache_day: str | None = None) -> tuple[pd.Timestamp, ...]:
+    _ = cache_day
     try:
         ticker = yf.Ticker(symbol)
         if not hasattr(ticker, "get_earnings_dates"):
             return tuple()
-        earnings = ticker.get_earnings_dates(limit=48)
+        with _quiet_yfinance_earnings_lookup():
+            earnings = ticker.get_earnings_dates(limit=48)
     except Exception:
         return tuple()
 
@@ -272,38 +282,85 @@ def _resolve_earnings_dates(
             out.add(ts.normalize())
         return out
 
-    cached = _cached_earnings_dates(symbol)
+    cached = _cached_earnings_dates(symbol, _earnings_cache_day())
     if not cached:
         return set()
 
-    low = min_date.normalize() - pd.Timedelta(days=7)
-    high = max_date.normalize() + pd.Timedelta(days=7)
+    low = min_date.normalize() - pd.Timedelta(days=_EARNINGS_DATE_LOOKBACK_CALENDAR_DAYS)
+    high = max_date.normalize() + pd.Timedelta(days=_EARNINGS_DATE_LOOKAHEAD_CALENDAR_DAYS)
     return {d for d in cached if low <= d <= high}
 
 
-def _mark_event_risk_window(dates: pd.Series, earnings_dates: set[pd.Timestamp]) -> pd.Series:
-    flags = pd.Series(False, index=dates.index, dtype=bool)
+@contextlib.contextmanager
+def _quiet_yfinance_earnings_lookup():
+    yf_logger = logging.getLogger("yfinance")
+    old_disabled = yf_logger.disabled
+    old_level = yf_logger.level
+    try:
+        yf_logger.disabled = True
+        yf_logger.setLevel(logging.CRITICAL)
+        with open(os.devnull, "w") as devnull:
+            with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                yield
+    finally:
+        yf_logger.disabled = old_disabled
+        yf_logger.setLevel(old_level)
+
+
+def _event_risk_window_details(dates: pd.Series, earnings_dates: set[pd.Timestamp]) -> pd.DataFrame:
+    details = pd.DataFrame(
+        {
+            "event_risk_blocked": pd.Series(False, index=dates.index, dtype=bool),
+            "event_risk_event_date": pd.Series(None, index=dates.index, dtype=object),
+            "event_risk_sessions_to_event": pd.Series(pd.NA, index=dates.index, dtype="Int64"),
+            "event_risk_calendar_days_to_event": pd.Series(pd.NA, index=dates.index, dtype="Int64"),
+            "event_risk_reason": pd.Series(None, index=dates.index, dtype=object),
+        }
+    )
     if dates.empty or not earnings_dates:
-        return flags
+        return details
 
-    base = pd.DatetimeIndex(dates)
+    base = pd.DatetimeIndex(pd.to_datetime(dates, errors="coerce")).normalize()
     for event_date in sorted(earnings_dates):
-        pos = base.searchsorted(event_date)
-        candidates: list[int] = []
-        if pos < len(base):
-            candidates.append(int(pos))
-        if pos - 1 >= 0:
-            candidates.append(int(pos - 1))
+        event_day = pd.Timestamp(event_date).normalize()
+        event_date_value = event_day.date()
+        for idx, row_day in enumerate(base):
+            if pd.isna(row_day):
+                continue
+            row_date_value = row_day.date()
+            sessions_to_event: int | None = None
+            reason: str | None = None
+            if row_day <= event_day:
+                sessions_to_event = np.busday_count(row_date_value, event_date_value)
+                if sessions_to_event <= _EARNINGS_BLACKOUT_PRE_EVENT_SESSIONS:
+                    reason = "earnings_within_prediction_window"
+            else:
+                sessions_since_event = np.busday_count(event_date_value, row_date_value)
+                if sessions_since_event <= _EARNINGS_BLACKOUT_POST_EVENT_SESSIONS:
+                    sessions_to_event = -int(sessions_since_event)
+                    reason = "earnings_cooldown"
 
-        if not candidates:
-            continue
+            if reason is None:
+                continue
 
-        chosen = min(candidates, key=lambda idx: abs((base[idx] - event_date).days))
-        start = max(0, chosen - 1)
-        end = min(len(base) - 1, chosen + 1)
-        flags.iloc[start : end + 1] = True
+            current_sessions = details.iloc[idx]["event_risk_sessions_to_event"]
+            should_replace = pd.isna(current_sessions) or abs(int(sessions_to_event)) < abs(int(current_sessions))
+            if not should_replace:
+                continue
 
-    return flags
+            details.iloc[idx, details.columns.get_loc("event_risk_blocked")] = True
+            details.iloc[idx, details.columns.get_loc("event_risk_event_date")] = _to_date_string(event_day)
+            details.iloc[idx, details.columns.get_loc("event_risk_sessions_to_event")] = int(sessions_to_event)
+            details.iloc[idx, details.columns.get_loc("event_risk_calendar_days_to_event")] = int(
+                (event_day - row_day).days
+            )
+            details.iloc[idx, details.columns.get_loc("event_risk_reason")] = reason
+
+    return details
+
+
+def _mark_event_risk_window(dates: pd.Series, earnings_dates: set[pd.Timestamp]) -> pd.Series:
+    return _event_risk_window_details(dates, earnings_dates)["event_risk_blocked"]
 
 
 def _build_context_features(frame: pd.DataFrame, prefix: str) -> pd.DataFrame:
@@ -733,7 +790,9 @@ def _prepare_feature_frame(
     min_date = pd.Timestamp(df["date"].iloc[0])
     max_date = pd.Timestamp(df["date"].iloc[-1])
     earnings_set = _resolve_earnings_dates(symbol, min_date=min_date, max_date=max_date, earnings_dates=earnings_dates)
-    df["event_risk_blocked"] = _mark_event_risk_window(df["date"], earnings_set)
+    event_risk_details = _event_risk_window_details(df["date"], earnings_set)
+    for col in event_risk_details.columns:
+        df[col] = event_risk_details[col].to_numpy()
     df.attrs["context_status"] = context_status
 
     return df
