@@ -13,6 +13,8 @@ from analysis.trade_entry_evaluation import (
     _MODEL_FEATURES,
     _apply_deployment_quality_gates_to_decision,
     _build_training_matrix,
+    _coverage_repair_candidates,
+    _coverage_repair_horizon,
     _deployment_quality_gate,
     _finalize_deployment_quality,
     _prepare_feature_frame,
@@ -20,6 +22,7 @@ from analysis.trade_entry_evaluation import (
     _prediction_book_preserves_accuracy,
     _quiet_yfinance_earnings_lookup,
     _reversal_veto_reason,
+    _select_max_safe_coverage_candidates,
     build_entry_decision_from_context,
     build_entry_decision_context_from_frame,
     build_entry_decision_from_frame,
@@ -100,6 +103,20 @@ def _manual_horizon(status, predicted_direction=None, confidence=0.7, tier=None,
         horizon["playbook"] = {"tier": tier, "id": signal_id or tier}
     elif signal_id:
         horizon["playbook"] = {"id": signal_id}
+    return horizon
+
+
+def _blocked_manual_horizon(predicted_direction: str, reason: str = "direction_quality_gate_failed") -> dict:
+    horizon = _manual_horizon("no_prediction")
+    horizon["no_prediction_reason"] = reason
+    horizon["blocked_prediction"] = {
+        "status": "prediction",
+        "predicted_direction": predicted_direction,
+        "confidence_score": 91,
+        "continuation_probability": 0.91 if predicted_direction == "continuation" else 0.09,
+        "reversal_probability": 0.91 if predicted_direction == "reversal" else 0.09,
+        "no_prediction_reason": None,
+    }
     return horizon
 
 
@@ -903,6 +920,98 @@ def test_coverage_expansion_accepts_bounded_accuracy_drop_for_material_coverage_
     assert five_day["coverage_repair_prediction_count"] == 7
     assert weak_signal["deployment_enabled"] is False
     assert weak_signal.get("coverage_expansion") is None
+
+
+def test_coverage_repair_uses_blocked_direction_as_a_separate_regime():
+    actual_by_index = {
+        0: "continuation",
+        6: "continuation",
+        12: "continuation",
+        18: "reversal",
+        24: "reversal",
+        30: "reversal",
+    }
+    df = _coverage_gate_frame(actual_by_index)
+    decisions = {
+        idx: _manual_decision(
+            _blocked_manual_horizon(actual),
+            _manual_horizon("no_prediction"),
+        )
+        for idx, actual in actual_by_index.items()
+    }
+
+    candidates = _coverage_repair_candidates(df, decisions, 5)
+    policies = [candidate["policy"] for candidate in candidates]
+
+    intent_policies = [
+        policy
+        for policy in policies
+        if "blocked_direction" in policy["fields"]
+    ]
+    assert intent_policies
+    assert {
+        (policy["direction"], policy["attrs"]["blocked_direction"])
+        for policy in intent_policies
+    } >= {
+        ("continuation", "continuation"),
+        ("reversal", "reversal"),
+    }
+    assert not any(
+        policy["scope"] == "side_only"
+        for policy in policies
+    )
+
+
+def test_coverage_repair_confidence_is_calibrated_below_perfect_small_sample_precision():
+    actual_by_index = {
+        0: "continuation",
+        6: "continuation",
+        12: "continuation",
+    }
+    df = _coverage_gate_frame(actual_by_index)
+    decisions = {
+        idx: _manual_decision(
+            _blocked_manual_horizon("continuation"),
+            _manual_horizon("no_prediction"),
+        )
+        for idx in actual_by_index
+    }
+
+    candidates = _coverage_repair_candidates(df, decisions, 5)
+    policy = max(
+        (candidate["policy"] for candidate in candidates if "blocked_direction" in candidate["policy"]["fields"]),
+        key=lambda item: item["score"],
+    )
+    horizon = _coverage_repair_horizon(df, 0, 5, policy)
+
+    assert policy["precision"] == 1.0
+    assert policy["calibrated_probability"] < policy["precision"]
+    assert horizon["confidence_score"] == round(policy["calibrated_probability"] * 100)
+    assert horizon["continuation_probability"] == pytest.approx(policy["calibrated_probability"])
+
+
+def test_coverage_selector_does_not_keep_redundant_greedy_policy_candidates():
+    duplicate_row = {
+        "_repair_row_key": ("2026-01-02", 5),
+        "predicted_direction": "continuation",
+        "is_correct": True,
+        "trade_return": 0.01,
+        "trade_return_atr": 0.20,
+    }
+    candidates = [
+        {
+            "key": f"duplicate_{idx}",
+            "rows": [duplicate_row.copy()],
+            "metrics": _prediction_book_metrics([duplicate_row]),
+            "gate": {"direction": "continuation"},
+            "policy": {"id": f"duplicate_{idx}", "direction": "continuation"},
+        }
+        for idx in range(19)
+    ]
+
+    selected = _select_max_safe_coverage_candidates([], candidates)
+
+    assert len(selected) == 1
 
 
 def test_coverage_expansion_accepts_more_calls_when_wilson_confidence_improves():

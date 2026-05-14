@@ -42,6 +42,8 @@ def entry_decision_model_version() -> str:
         "earnings_blackout_post_event_sessions": _EARNINGS_BLACKOUT_POST_EVENT_SESSIONS,
         "earnings_date_lookahead_calendar_days": _EARNINGS_DATE_LOOKAHEAD_CALENDAR_DAYS,
         "coverage_expansion_max_accuracy_drop": _COVERAGE_EXPANSION_MAX_ACCURACY_DROP,
+        "coverage_repair_policy_version": 2,
+        "coverage_repair_calibration": "posterior_precision_wilson_v1",
         "model_iterations": _MODEL_ITERATIONS,
         "model_learning_rate": _MODEL_LEARNING_RATE,
         "model_l2": _MODEL_L2,

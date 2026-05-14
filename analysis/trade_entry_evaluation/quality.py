@@ -414,11 +414,16 @@ def _select_max_safe_coverage_candidates(selected_rows: list[dict], candidates: 
     remaining = sorted(candidates, key=_candidate_priority_key, reverse=True)
     chosen: list[dict] = []
     while remaining:
+        current_rows = _candidate_rows(selected_rows, chosen)
+        current_metrics = _prediction_book_metrics(current_rows)
+        current_key = _candidate_selection_key(chosen, current_metrics)
         safe_candidates: list[tuple[tuple, dict]] = []
         for candidate in remaining:
             is_safe, metrics = candidate_is_safe(chosen + [candidate])
             if is_safe:
-                safe_candidates.append((_candidate_selection_key(chosen + [candidate], metrics), candidate))
+                key = _candidate_selection_key(chosen + [candidate], metrics)
+                if key > current_key:
+                    safe_candidates.append((key, candidate))
         if not safe_candidates:
             break
         _, next_candidate = max(safe_candidates, key=lambda item: item[0])
@@ -507,11 +512,30 @@ def _apply_max_safe_coverage_to_signal_gates(backtest: dict, signal_gates: dict[
 
 def _coverage_repair_specs() -> list[tuple[str, tuple[str, ...], int]]:
     return [
+        (
+            "blocked_side_touch_cluster_trend",
+            ("side", "blocked_direction", "touch_quality", "cluster", "trend"),
+            3,
+        ),
+        ("blocked_side_touch_trend", ("side", "blocked_direction", "touch_quality", "trend"), 3),
+        ("blocked_side_cluster_trend", ("side", "blocked_direction", "cluster", "trend"), 3),
+        ("blocked_side_reason_trend", ("side", "blocked_direction", "reason", "trend"), 3),
+        ("blocked_side_trend_market", ("side", "blocked_direction", "trend", "market"), 3),
+        ("blocked_side_touch_band", ("side", "blocked_direction", "touch_quality", "band_state"), 3),
+        ("blocked_side_trend", ("side", "blocked_direction", "trend"), 4),
+        ("blocked_side_reason", ("side", "blocked_direction", "reason"), 4),
+        ("blocked_side", ("side", "blocked_direction"), 6),
         ("side_touch_cluster_trend", ("side", "touch_quality", "cluster", "trend"), 3),
+        ("side_touch_trend_market", ("side", "touch_quality", "trend", "market"), 3),
+        ("side_touch_volume", ("side", "touch_quality", "volume_pressure"), 4),
+        ("side_trend_market", ("side", "trend", "market"), 4),
+        ("side_touch_band", ("side", "touch_quality", "band_state"), 4),
         ("side_touch_trend", ("side", "touch_quality", "trend"), 3),
         ("side_cluster_trend", ("side", "cluster", "trend"), 3),
         ("side_reason_trend", ("side", "reason", "trend"), 3),
         ("side_touch_cluster", ("side", "touch_quality", "cluster"), 4),
+        ("side_band_state", ("side", "band_state"), 5),
+        ("side_volume_pressure", ("side", "volume_pressure"), 5),
         ("side_trend", ("side", "trend"), 4),
         ("side_cluster", ("side", "cluster"), 4),
         ("side_reason", ("side", "reason"), 4),
@@ -531,6 +555,43 @@ def _coverage_repair_policy_id(scope: str, direction: str, fields: tuple[str, ..
     pieces = [scope, direction] + [f"{field}_{attrs.get(field, 'na')}" for field in fields]
     text = "_".join(pieces).lower()
     return "coverage_repair_" + re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+
+
+def _coverage_repair_policy_score(
+    precision: float,
+    posterior: float,
+    wilson: float,
+    match_count: int,
+    field_count: int,
+) -> float:
+    sample_strength = min(1.0, math.log1p(max(0, match_count)) / math.log1p(32.0))
+    specificity = min(1.0, max(0, field_count) / 5.0)
+    return (
+        (0.40 * precision)
+        + (0.24 * wilson)
+        + (0.18 * posterior)
+        + (0.12 * sample_strength)
+        + (0.06 * specificity)
+    )
+
+
+def _coverage_repair_calibrated_probability(precision: float, posterior: float, wilson: float) -> float:
+    return _clamp(
+        (0.55 * posterior) + (0.30 * precision) + (0.15 * wilson),
+        0.51,
+        0.99,
+    )
+
+
+def _coverage_repair_policy_rank_key(policy: dict) -> tuple:
+    return (
+        _safe_num(policy.get("score"), 0.0),
+        _safe_num(policy.get("wilson_lower_bound"), 0.0),
+        _safe_num(policy.get("posterior_probability"), 0.0),
+        _safe_num(policy.get("precision"), 0.0),
+        int(_safe_num(policy.get("match_count"), 0)),
+        len(policy.get("fields") or []),
+    )
 
 
 def _coverage_repair_prediction_row(
@@ -553,6 +614,7 @@ def _coverage_repair_prediction_row(
         outcome_close,
         atr,
     )
+    confidence = _safe_num(policy.get("calibrated_probability"), policy.get("posterior_probability", 0.0))
     return {
         "_repair_row_key": (int(idx), horizon),
         "_repair_policy": policy,
@@ -562,7 +624,7 @@ def _coverage_repair_prediction_row(
         "touched_side": row.get("touched_side"),
         "predicted_direction": direction,
         "actual_direction": actual_direction,
-        "confidence_score": int(round(_safe_num(policy.get("precision"), 0.0) * 100.0)),
+        "confidence_score": int(round(confidence * 100.0)),
         "is_correct": _prediction_is_correct(direction, actual_direction),
         "signal_close": round(signal_close, 6) if np.isfinite(signal_close) else None,
         "outcome_close": round(outcome_close, 6) if np.isfinite(outcome_close) else None,
@@ -628,12 +690,21 @@ def _coverage_repair_candidates(
             correct_count = sum(1 for row in rows if row["actual_direction"] == direction)
             match_count = len(rows)
             precision = correct_count / match_count
+            posterior = (correct_count + 1.0) / (match_count + 2.0)
             wilson = _wilson_lower_bound(correct_count, match_count)
             if (
                 precision < _COVERAGE_REPAIR_MIN_PRECISION
                 or wilson < _COVERAGE_REPAIR_MIN_WILSON
             ):
                 continue
+            score = _coverage_repair_policy_score(
+                precision,
+                posterior,
+                wilson,
+                match_count,
+                len(fields),
+            )
+            calibrated_probability = _coverage_repair_calibrated_probability(precision, posterior, wilson)
             policy = {
                 "id": _coverage_repair_policy_id(scope, direction, fields, attrs),
                 "name": "Selective Coverage Repair",
@@ -645,8 +716,10 @@ def _coverage_repair_candidates(
                 "match_count": match_count,
                 "correct_count": correct_count,
                 "precision": round(precision, 6),
-                "posterior_probability": round((correct_count + 1.0) / (match_count + 2.0), 6),
+                "posterior_probability": round(posterior, 6),
                 "wilson_lower_bound": round(wilson, 6),
+                "calibrated_probability": round(calibrated_probability, 6),
+                "score": round(score, 6),
             }
             prediction_rows = [
                 _coverage_repair_prediction_row(
@@ -685,7 +758,15 @@ def _coverage_repair_horizon(
     direction = policy["direction"]
     precision = _clamp(_safe_num(policy.get("precision"), 0.5), 0.01, 0.99)
     posterior = _clamp(_safe_num(policy.get("posterior_probability"), precision), 0.01, 0.99)
-    probability = max(precision, posterior)
+    wilson = _clamp(_safe_num(policy.get("wilson_lower_bound"), posterior), 0.01, 0.99)
+    probability = _clamp(
+        _safe_num(
+            policy.get("calibrated_probability"),
+            _coverage_repair_calibrated_probability(precision, posterior, wilson),
+        ),
+        0.01,
+        0.99,
+    )
     if direction == "continuation":
         continuation_probability = probability
         reversal_probability = 1.0 - probability
@@ -792,7 +873,7 @@ def _apply_coverage_repair_policies(
                 continue
             policy = sorted(
                 matching,
-                key=lambda item: (item["precision"], item["match_count"], len(item["fields"])),
+                key=_coverage_repair_policy_rank_key,
                 reverse=True,
             )[0]
             decision["horizons"][horizon_key] = _coverage_repair_horizon(feature_df, idx, horizon, policy)
