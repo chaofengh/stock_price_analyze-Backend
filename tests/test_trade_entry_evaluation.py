@@ -359,6 +359,23 @@ def test_training_matrix_uses_non_touch_rows_when_outcomes_are_known():
     assert set(y_train.tolist()) == {1.0}
 
 
+def test_similar_case_payload_uses_training_side_for_non_touch_analog_rows():
+    df = _empty_supervised_frame(12)
+    df["close"] = 100.0
+    df.loc[0, "analysis_side_sign"] = 1.0
+    df.loc[5, "close"] = 110.0
+
+    case = tee._similar_case_payload(df, 0, 5, "continuation", similarity=0.9)
+
+    assert case["touched_side"] == "Upper"
+    assert case["was_band_touch"] is False
+    assert case["actual_direction"] == "continuation"
+    assert case["is_correct"] is True
+    assert case["trade_direction"] == "long"
+    assert case["trade_return"] == pytest.approx(0.1)
+    assert case["similarity"] == pytest.approx(0.9)
+
+
 def test_adaptive_model_does_not_use_future_labeled_results():
     df, target_idx = _build_learnable_supervised_frame(target_feature_value=2.5)
     baseline = evaluate_row_decision(df.iloc[target_idx], feature_df=df, row_index=target_idx)
@@ -998,6 +1015,48 @@ def test_coverage_repair_confidence_is_calibrated_below_perfect_small_sample_pre
     assert policy["calibrated_probability"] < policy["precision"]
     assert horizon["confidence_score"] == round(policy["calibrated_probability"] * 100)
     assert horizon["continuation_probability"] == pytest.approx(policy["calibrated_probability"])
+
+
+def test_coverage_repair_horizon_exposes_similar_past_cases():
+    actual_by_index = {
+        0: "reversal",
+        6: "reversal",
+        12: "reversal",
+        18: "reversal",
+        24: "reversal",
+        30: "reversal",
+        36: "continuation",
+    }
+    df = _coverage_gate_frame(actual_by_index)
+    decisions = {
+        idx: _manual_decision(
+            _blocked_manual_horizon("reversal"),
+            _manual_horizon("no_prediction"),
+        )
+        for idx in actual_by_index
+    }
+
+    candidates = _coverage_repair_candidates(df, decisions, 5)
+    policy = max(
+        (candidate["policy"] for candidate in candidates if candidate["policy"]["direction"] == "reversal"),
+        key=lambda item: item["score"],
+    )
+    horizon = _coverage_repair_horizon(df, 0, 5, policy)
+
+    assert policy["match_count"] == 7
+    assert policy["neighbors"]
+    assert horizon["key_reasons"]
+    assert horizon["key_reasons"][0]["feature"] == "Selective Coverage Repair"
+    assert horizon["playbook"]["neighbors"]
+    assert horizon["similar_past_cases"]
+    case = horizon["similar_past_cases"][0]
+    assert case["signal_date"]
+    assert case["outcome_date"]
+    assert case["predicted_direction"] == "reversal"
+    assert case["actual_direction"] in {"reversal", "continuation"}
+    assert case["is_correct"] in {True, False}
+    assert "trade_return" in case
+    assert "_repair_policy" not in case
 
 
 def test_coverage_selector_does_not_keep_redundant_greedy_policy_candidates():

@@ -637,6 +637,28 @@ def _coverage_repair_prediction_row(
     }
 
 
+def _coverage_repair_similar_cases(prediction_rows: list[dict], limit: int = 8) -> list[dict]:
+    cases: list[dict] = []
+    for row in prediction_rows[-limit:]:
+        cases.append(
+            {
+                "signal_date": row.get("signal_date"),
+                "outcome_date": row.get("outcome_date"),
+                "horizon_days": row.get("horizon_days"),
+                "touched_side": row.get("touched_side"),
+                "predicted_direction": row.get("predicted_direction"),
+                "actual_direction": row.get("actual_direction"),
+                "signal_close": row.get("signal_close"),
+                "outcome_close": row.get("outcome_close"),
+                "is_correct": row.get("is_correct"),
+                "trade_direction": row.get("trade_direction"),
+                "trade_return": row.get("trade_return"),
+                "trade_return_atr": row.get("trade_return_atr"),
+            }
+        )
+    return cases
+
+
 def _coverage_repair_candidates(
     feature_df: pd.DataFrame,
     decisions_by_index: dict[int, dict],
@@ -732,6 +754,7 @@ def _coverage_repair_candidates(
                 )
                 for row in rows
             ]
+            policy["neighbors"] = _coverage_repair_similar_cases(prediction_rows)
             candidates.append(
                 {
                     "key": policy["id"],
@@ -784,6 +807,14 @@ def _coverage_repair_horizon(
         candidate_count=1,
     )
     model["type"] = "selective_coverage_repair"
+    reason = {
+        "rank": 1,
+        "horizon": f"{horizon}d",
+        "feature": policy["name"],
+        "value": policy["match_count"],
+        "impact": direction,
+        "contribution": policy["precision"],
+    }
     return {
         "status": "prediction",
         "predicted_direction": direction,
@@ -835,15 +866,9 @@ def _coverage_repair_horizon(
                 "blocked_reason": None,
             }
         ],
-        "contributions": [
-            {
-                "horizon": f"{horizon}d",
-                "feature": policy["name"],
-                "value": policy["match_count"],
-                "impact": direction,
-                "contribution": policy["precision"],
-            }
-        ],
+        "key_reasons": [deepcopy(reason)],
+        "similar_past_cases": deepcopy(policy.get("neighbors") or []),
+        "contributions": [reason],
         "model": model,
     }
 

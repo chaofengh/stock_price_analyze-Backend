@@ -199,16 +199,22 @@ def _similar_case_payload(
 
     row = feature_df.iloc[int(idx)]
     outcome_row = feature_df.iloc[outcome_idx]
-    touched_side = row.get("touched_side")
+    raw_touched_side = row.get("touched_side")
+    touched_side = raw_touched_side if raw_touched_side in ("Upper", "Lower") else _training_side_for_row(row)
     signal_close = _safe_num(row.get("close"), np.nan)
     outcome_close = _safe_num(outcome_row.get("close"), np.nan)
     atr = _safe_num(row.get("ATR14"), np.nan)
-    actual_direction = _actual_direction_for_index(feature_df, int(idx), horizon)
+    actual_direction = (
+        _actual_direction(touched_side, signal_close, outcome_close, _flat_tolerance_for_row(row))
+        if touched_side in ("Upper", "Lower")
+        else None
+    )
     payload = {
         "signal_date": _to_date_string(row.get("date")),
         "outcome_date": _to_date_string(outcome_row.get("date")),
         "horizon_days": int(horizon),
         "touched_side": touched_side,
+        "was_band_touch": raw_touched_side in ("Upper", "Lower"),
         "predicted_direction": predicted_direction,
         "actual_direction": actual_direction,
         "signal_close": round(signal_close, 6) if np.isfinite(signal_close) else None,
