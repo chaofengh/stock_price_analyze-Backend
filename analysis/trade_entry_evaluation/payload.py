@@ -5,6 +5,7 @@ from .features import *
 from .freshness import (
     build_entry_context_metadata,
     evaluate_entry_context_freshness,
+    latest_required_price_date,
 )
 from .decision import evaluate_row_decision
 from .backtest import _empty_backtest_result, _prediction_return_values
@@ -45,6 +46,33 @@ def _build_entry_chart_data(feature_df: pd.DataFrame) -> list[dict]:
 
 def _feature_frame_through_index(feature_df: pd.DataFrame, resolved_idx: int) -> pd.DataFrame:
     scoped = feature_df.iloc[: resolved_idx + 1].copy().reset_index(drop=True)
+    attrs = dict(feature_df.attrs)
+    attrs.pop("_adaptive_analog_state", None)
+    scoped.attrs = attrs
+    return scoped
+
+
+def _feature_frame_through_price_date(
+    feature_df: pd.DataFrame,
+    price_data_cutoff_date: str | pd.Timestamp | None,
+) -> pd.DataFrame:
+    cutoff = _parse_as_of_date(price_data_cutoff_date)
+    if cutoff is None:
+        return feature_df
+
+    dates = pd.DatetimeIndex(pd.to_datetime(feature_df["date"], errors="coerce")).normalize()
+    scoped = feature_df.loc[dates <= cutoff].copy().reset_index(drop=True)
+    if scoped.empty:
+        raise ValueError(
+            f"No completed price data available through {cutoff.strftime('%Y-%m-%d')}."
+        )
+    scoped_end = pd.Timestamp(scoped["date"].iloc[-1]).normalize()
+    if scoped_end < cutoff:
+        raise ValueError(
+            "Latest required close is not available yet: "
+            f"required {cutoff.strftime('%Y-%m-%d')}, "
+            f"available through {scoped_end.strftime('%Y-%m-%d')}."
+        )
     attrs = dict(feature_df.attrs)
     attrs.pop("_adaptive_analog_state", None)
     scoped.attrs = attrs
@@ -326,6 +354,7 @@ def build_entry_decision_context_from_frame(
     earnings_dates: set[pd.Timestamp] | None = None,
     earnings_symbol: str | None = None,
     context_frames: dict[str, pd.DataFrame] | None = None,
+    price_data_cutoff_date: str | pd.Timestamp | None = None,
 ) -> dict:
     normalized = normalize_symbol(symbol)
     if not normalized:
@@ -339,6 +368,7 @@ def build_entry_decision_context_from_frame(
         earnings_dates=earnings_dates,
         context_frames=context_frames,
     )
+    feature_df = _feature_frame_through_price_date(feature_df, price_data_cutoff_date)
     decisions_by_index: dict[int, dict] = {}
     decisions_by_index, backtest_1y = _finalize_deployment_quality(feature_df, decisions_by_index)
     return {
@@ -423,7 +453,7 @@ def _load_context_frames(symbol: str) -> dict[str, pd.DataFrame]:
 
 
 def _entry_cache_day() -> str:
-    return pd.Timestamp.now(tz="America/Chicago").strftime("%Y-%m-%d")
+    return latest_required_price_date() or pd.Timestamp.now(tz="America/Chicago").strftime("%Y-%m-%d")
 
 
 @lru_cache(maxsize=_ENTRY_CONTEXT_CACHE_SIZE)
@@ -439,6 +469,7 @@ def _get_entry_feature_context_cached(symbol: str, cache_day: str) -> tuple[str,
         earnings_dates=None,
         context_frames=_load_context_frames(resolved_symbol or symbol),
     )
+    feature_df = _feature_frame_through_price_date(feature_df, cache_day)
     return resolved_symbol or symbol, feature_df, {}
 
 

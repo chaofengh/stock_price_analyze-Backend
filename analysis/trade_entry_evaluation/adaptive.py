@@ -149,6 +149,80 @@ def _adaptive_row_context(feature_df: pd.DataFrame, row_index: int, horizon: int
     return context
 
 
+def _case_trade_return(
+    touched_side: str | None,
+    predicted_direction: str | None,
+    signal_close: float,
+    outcome_close: float,
+    atr: float,
+) -> dict:
+    side_sign = _side_sign(touched_side)
+    if predicted_direction == "continuation":
+        trade_sign = side_sign
+    elif predicted_direction == "reversal":
+        trade_sign = -side_sign
+    else:
+        trade_sign = 0.0
+
+    if (
+        abs(trade_sign) <= _EPS
+        or not np.isfinite(signal_close)
+        or signal_close <= 0
+        or not np.isfinite(outcome_close)
+    ):
+        return {"trade_direction": None, "trade_return": None, "trade_return_atr": None}
+
+    price_delta = outcome_close - signal_close
+    trade_return = trade_sign * (price_delta / signal_close)
+    trade_return_atr = None
+    if np.isfinite(atr) and atr > 0:
+        trade_return_atr = trade_sign * (price_delta / atr)
+    return {
+        "trade_direction": "long" if trade_sign > 0 else "short",
+        "trade_return": round(float(trade_return), 6),
+        "trade_return_atr": round(float(trade_return_atr), 6) if trade_return_atr is not None else None,
+    }
+
+
+def _similar_case_payload(
+    feature_df: pd.DataFrame,
+    idx: int,
+    horizon: int,
+    predicted_direction: str,
+    *,
+    distance: float | None = None,
+    similarity: float | None = None,
+) -> dict | None:
+    outcome_idx = int(idx) + int(horizon)
+    if idx < 0 or outcome_idx >= len(feature_df):
+        return None
+
+    row = feature_df.iloc[int(idx)]
+    outcome_row = feature_df.iloc[outcome_idx]
+    touched_side = row.get("touched_side")
+    signal_close = _safe_num(row.get("close"), np.nan)
+    outcome_close = _safe_num(outcome_row.get("close"), np.nan)
+    atr = _safe_num(row.get("ATR14"), np.nan)
+    actual_direction = _actual_direction_for_index(feature_df, int(idx), horizon)
+    payload = {
+        "signal_date": _to_date_string(row.get("date")),
+        "outcome_date": _to_date_string(outcome_row.get("date")),
+        "horizon_days": int(horizon),
+        "touched_side": touched_side,
+        "predicted_direction": predicted_direction,
+        "actual_direction": actual_direction,
+        "signal_close": round(signal_close, 6) if np.isfinite(signal_close) else None,
+        "outcome_close": round(outcome_close, 6) if np.isfinite(outcome_close) else None,
+        "is_correct": bool(_prediction_is_correct(predicted_direction, actual_direction)),
+        **_case_trade_return(touched_side, predicted_direction, signal_close, outcome_close, atr),
+    }
+    if distance is not None:
+        payload["distance"] = round(float(distance), 6)
+    if similarity is not None:
+        payload["similarity"] = round(float(similarity), 6)
+    return payload
+
+
 def _adaptive_raw_profile_prediction(
     feature_df: pd.DataFrame,
     row_index: int,
@@ -225,15 +299,17 @@ def _adaptive_raw_profile_prediction(
     )
 
     neighbors = []
-    for idx, label, distance in zip(neighbor_idx[:8], neighbor_labels[:8], neighbor_distances[:8]):
-        neighbors.append(
-            {
-                "date": _to_date_string(feature_df.iloc[int(idx)].get("date")),
-                "direction": "continuation" if int(label) == 1 else "reversal",
-                "distance": round(float(distance), 6),
-                "touched_side": feature_df.iloc[int(idx)].get("touched_side"),
-            }
+    for idx, distance, case_similarity in zip(neighbor_idx[:8], neighbor_distances[:8], similarity[:8]):
+        case = _similar_case_payload(
+            feature_df,
+            int(idx),
+            horizon,
+            direction,
+            distance=float(distance),
+            similarity=float(case_similarity),
         )
+        if case is not None:
+            neighbors.append(case)
 
     result = {
         "profile": profile,
@@ -503,15 +579,46 @@ def _empirical_rows_for_scope(
         actual = _actual_direction_for_index(feature_df, idx, horizon)
         if actual not in ("continuation", "reversal"):
             continue
+        outcome_row = feature_df.iloc[idx + horizon]
+        signal_close = _safe_num(row.get("close"), np.nan)
+        outcome_close = _safe_num(outcome_row.get("close"), np.nan)
         matches.append(
             {
                 "idx": idx,
-                "date": _to_date_string(row.get("date")),
+                "signal_date": _to_date_string(row.get("date")),
+                "outcome_date": _to_date_string(outcome_row.get("date")),
                 "direction": actual,
+                "actual_direction": actual,
                 "touched_side": row.get("touched_side"),
+                "signal_close": round(signal_close, 6) if np.isfinite(signal_close) else None,
+                "outcome_close": round(outcome_close, 6) if np.isfinite(outcome_close) else None,
+                "horizon_days": int(horizon),
             }
         )
     return matches[-_EMPIRICAL_REGIME_MAX_MATCHES:]
+
+
+def _empirical_case_for_direction(row: dict, direction: str) -> dict:
+    signal_close = _safe_num(row.get("signal_close"), np.nan)
+    outcome_close = _safe_num(row.get("outcome_close"), np.nan)
+    return {
+        "signal_date": row.get("signal_date") or row.get("date"),
+        "outcome_date": row.get("outcome_date"),
+        "horizon_days": row.get("horizon_days"),
+        "touched_side": row.get("touched_side"),
+        "predicted_direction": direction,
+        "actual_direction": row.get("actual_direction") or row.get("direction"),
+        "signal_close": row.get("signal_close"),
+        "outcome_close": row.get("outcome_close"),
+        "is_correct": bool(_prediction_is_correct(direction, row.get("actual_direction") or row.get("direction"))),
+        **_case_trade_return(
+            row.get("touched_side"),
+            direction,
+            signal_close,
+            outcome_close,
+            np.nan,
+        ),
+    }
 
 
 def _score_empirical_regime_direction(
@@ -568,7 +675,7 @@ def _score_empirical_regime_direction(
         "wilson_lower_bound": wilson,
         "recent_precision": recent_precision,
         "score": score,
-        "neighbors": rows[-8:],
+        "neighbors": [_empirical_case_for_direction(row, direction) for row in rows[-8:]],
     }
 
 
@@ -632,7 +739,7 @@ def _score_recent_empirical_regime_direction(
                 "recent_precision": precision,
                 "full_precision": full_precision,
                 "score": score,
-                "neighbors": recent_rows[-8:],
+                "neighbors": [_empirical_case_for_direction(row, direction) for row in recent_rows[-8:]],
             }
         )
     return out

@@ -27,10 +27,12 @@ from analysis.data_preparation import prepare_stock_data
 from analysis.trade_entry_evaluation import (
     build_entry_decision_context_from_frame,
     build_entry_decision_from_context,
+    context_metadata_from_payload,
     entry_context_serving_allowed,
     entry_payload_serving_allowed,
     evaluate_entry_context_freshness,
     get_entry_decision_context,
+    latest_required_price_date,
     refresh_payload_freshness,
 )
 from utils.serialization import convert_to_python_types
@@ -266,7 +268,45 @@ def _context_can_be_served(context: dict | None) -> bool:
 
 
 def _cache_day() -> str:
-    return datetime.now(_CHICAGO_TZ).strftime("%Y-%m-%d")
+    return latest_required_price_date() or datetime.now(_CHICAGO_TZ).strftime("%Y-%m-%d")
+
+
+def _metadata_price_data_end_date(metadata: dict | None) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    value = metadata.get("price_data_end_date")
+    if not value:
+        return None
+    text = str(value)[:10]
+    try:
+        datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return text
+
+
+def _payload_has_completed_price_date_for_cache_day(
+    payload: dict | None,
+    cache_day: str,
+) -> bool:
+    price_end = _metadata_price_data_end_date(context_metadata_from_payload(payload))
+    return price_end is not None and price_end >= cache_day
+
+
+def _cached_payload_can_satisfy_cache_day(cached: dict | None, cache_day: str) -> bool:
+    if not isinstance(cached, dict):
+        return False
+    payload = cached.get("payload")
+    return _payload_can_be_served(payload) and _payload_has_completed_price_date_for_cache_day(payload, cache_day)
+
+
+def _context_has_completed_price_date_for_cache_day(
+    context: dict | None,
+    cache_day: str,
+) -> bool:
+    metadata = context.get("meta") if isinstance(context, dict) else None
+    price_end = _metadata_price_data_end_date(metadata)
+    return price_end is not None and price_end >= cache_day
 
 
 def _normalize_as_of_date(as_of_date: str | None = None) -> str:
@@ -381,7 +421,7 @@ def _copy_cached_payload_locked(key: tuple[str, str, str], *, full_only: bool = 
     payload = cached.get("payload")
     if full_only and not _payload_is_full_model(payload):
         return None
-    if not entry_payload_serving_allowed(payload):
+    if not entry_payload_serving_allowed(payload) or not _payload_has_completed_price_date_for_cache_day(payload, key[0]):
         _payload_cache.pop(key, None)
         _failure_retry_after.pop(key, None)
         _interactive_failure_retry_after.pop(key, None)
@@ -408,7 +448,10 @@ def get_preloaded_entry_decision(
         context_cache_key = _context_key(normalized)
         cached_context = _context_cache.get(context_cache_key)
         context = cached_context.get("context") if isinstance(cached_context, dict) else None
-        if context is not None and not _context_can_be_served(context):
+        if context is not None and (
+            not _context_can_be_served(context)
+            or not _context_has_completed_price_date_for_cache_day(context, context_cache_key[0])
+        ):
             _context_cache.pop(context_cache_key, None)
             context = None
         if context is None and not as_of_date:
@@ -486,14 +529,15 @@ def _symbols_needing_preload(
             key = _cache_key(symbol, preload_date)
             if _failure_retry_after.get(key, 0.0) > now:
                 continue
-            cached_context = _context_cache.get(_context_key(symbol))
+            context_key = _context_key(symbol)
+            cached_context = _context_cache.get(context_key)
             context = cached_context.get("context") if isinstance(cached_context, dict) else None
             if context is not None:
-                if _context_can_be_served(context):
+                if _context_can_be_served(context) and _context_has_completed_price_date_for_cache_day(context, context_key[0]):
                     continue
-                _context_cache.pop(_context_key(symbol), None)
+                _context_cache.pop(context_key, None)
             cached = _payload_cache.get(key)
-            if cached is None or not _payload_can_be_served(cached.get("payload")):
+            if not _cached_payload_can_satisfy_cache_day(cached, key[0]):
                 pending.append(symbol)
                 continue
             if full_only and not _payload_is_full_model(cached.get("payload")):
@@ -511,11 +555,11 @@ def _key_needs_full_preload_locked(key: tuple[str, str, str], now: float | None 
     cached_context = _context_cache.get((cache_day, _symbol))
     context = cached_context.get("context") if isinstance(cached_context, dict) else None
     if context is not None:
-        if _context_can_be_served(context):
+        if _context_can_be_served(context) and _context_has_completed_price_date_for_cache_day(context, cache_day):
             return False
         _context_cache.pop((cache_day, _symbol), None)
     cached = _payload_cache.get(key)
-    if cached is None or not _payload_can_be_served(cached.get("payload")):
+    if not _cached_payload_can_satisfy_cache_day(cached, cache_day):
         return True
     return not _payload_is_full_model(cached.get("payload"))
 
@@ -770,6 +814,7 @@ def _compute_preload_artifacts(
                 earnings_dates=None,
                 earnings_symbol=resolved_symbol or symbol,
                 context_frames=context_frames,
+                price_data_cutoff_date=_cache_day(),
             )
             payload = build_entry_decision_from_context(context, as_of_date=as_of_date)
             loaded[symbol] = convert_to_python_types(payload)

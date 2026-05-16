@@ -79,6 +79,6 @@ def test_create_scheduler_registers_market_hour_scan_watchlist_and_preload_jobs(
     assert after_close_job["trigger"] == "cron"
     assert after_close_job["day_of_week"] == "mon-fri"
     assert after_close_job["hour"] == os.getenv("ENTRY_DECISION_AFTER_CLOSE_PRELOAD_CRON_HOUR", "15")
-    assert after_close_job["minute"] == os.getenv("ENTRY_DECISION_AFTER_CLOSE_PRELOAD_CRON_MINUTE", "10")
+    assert after_close_job["minute"] == os.getenv("ENTRY_DECISION_AFTER_CLOSE_PRELOAD_CRON_MINUTE", "35")
     assert after_close_job["replace_existing"] is True
     assert after_close_job["max_instances"] == 1

@@ -388,6 +388,16 @@ def test_adaptive_model_can_make_validated_continuation_predictions():
     assert horizon["predicted_direction"] == "continuation"
     assert horizon["continuation_validation_precision"] >= 0.75
     assert horizon["playbook"]["tier"] in {"core", "expansion", "opportunity", "regime"}
+    assert horizon["key_reasons"]
+    assert horizon["key_reasons"][0]["feature"]
+    assert horizon["similar_past_cases"]
+    similar_case = horizon["similar_past_cases"][0]
+    assert similar_case["signal_date"]
+    assert similar_case["outcome_date"]
+    assert similar_case["predicted_direction"] == "continuation"
+    assert similar_case["actual_direction"] in {"continuation", "reversal"}
+    assert similar_case["is_correct"] in {True, False}
+    assert "trade_return" in similar_case
 
 
 def test_continuation_signal_is_vetoed_when_band_rejection_is_strong():
@@ -1298,6 +1308,34 @@ def test_entry_context_metadata_versions_data_end_and_quality():
     assert payload["meta"]["quality"] == meta["quality"]
 
 
+def test_entry_context_can_be_cut_to_latest_completed_price_date():
+    df = _force_lower_touch(_base_frame(140))
+    cutoff_date = pd.Timestamp(df["date"].iloc[-3]).strftime("%Y-%m-%d")
+
+    context = build_entry_decision_context_from_frame(
+        "TEST",
+        df,
+        earnings_dates=set(),
+        price_data_cutoff_date=cutoff_date,
+    )
+
+    assert context["meta"]["price_data_end_date"] == cutoff_date
+    assert pd.Timestamp(context["feature_df"]["date"].iloc[-1]).strftime("%Y-%m-%d") == cutoff_date
+
+
+def test_entry_context_cutoff_requires_latest_completed_price_date():
+    df = _force_lower_touch(_base_frame(140))
+    missing_cutoff = (pd.Timestamp(df["date"].iloc[-1]) + pd.offsets.BDay(1)).strftime("%Y-%m-%d")
+
+    with pytest.raises(ValueError, match="Latest required close is not available yet"):
+        build_entry_decision_context_from_frame(
+            "TEST",
+            df,
+            earnings_dates=set(),
+            price_data_cutoff_date=missing_cutoff,
+        )
+
+
 def test_entry_context_freshness_detects_fresh_stale_and_expired(monkeypatch):
     chicago = pytz.timezone("America/Chicago")
     base_meta = {
@@ -1354,3 +1392,9 @@ def test_entry_context_freshness_expires_when_model_or_schema_changes():
     assert schema_changed["status"] == "expired"
     assert schema_changed["reason"] == "feature_schema_changed"
     assert schema_changed["serving_allowed"] is False
+
+
+def test_entry_context_lru_cache_day_tracks_latest_required_price_date(monkeypatch):
+    monkeypatch.setitem(tee._entry_cache_day.__globals__, "latest_required_price_date", lambda: "2026-04-16")
+
+    assert tee._entry_cache_day() == "2026-04-16"

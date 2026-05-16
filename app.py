@@ -125,7 +125,7 @@ def create_scheduler(app: Flask):
         id="entry_decision_after_close_preload",
         day_of_week="mon-fri",
         hour=os.getenv("ENTRY_DECISION_AFTER_CLOSE_PRELOAD_CRON_HOUR", "15"),
-        minute=os.getenv("ENTRY_DECISION_AFTER_CLOSE_PRELOAD_CRON_MINUTE", "10"),
+        minute=os.getenv("ENTRY_DECISION_AFTER_CLOSE_PRELOAD_CRON_MINUTE", "35"),
         replace_existing=True,
         max_instances=1,
     )

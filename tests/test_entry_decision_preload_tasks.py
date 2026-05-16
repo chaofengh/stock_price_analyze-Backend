@@ -50,6 +50,71 @@ def test_default_worker_timeout_allows_realistic_cold_entry_model_runtime():
     assert preload_tasks.DEFAULT_WORKER_TIMEOUT_SECONDS >= 180
 
 
+def test_cache_day_tracks_latest_required_completed_price_date():
+    with patch("tasks.entry_decision_preload_tasks.latest_required_price_date", return_value="2026-04-16"):
+        assert preload_tasks._cache_day() == "2026-04-16"
+
+
+def test_preloaded_payload_cache_rotates_when_latest_required_price_date_changes():
+    payload = {
+        "symbol": "AMD",
+        "requested_as_of_date": "2100-01-01",
+        "as_of_date": "2100-01-01",
+        "meta": {
+            "full_decision_preloaded": True,
+            "context": _entry_context_meta(price_data_end_date="2100-01-01"),
+        },
+    }
+
+    with patch("tasks.entry_decision_preload_tasks.latest_required_price_date", return_value="2100-01-01"):
+        assert preload_tasks.store_preloaded_entry_decision("AMD", payload, as_of_date="2100-01-01")
+        assert preload_tasks.get_preloaded_entry_decision("AMD", as_of_date="2100-01-01") is not None
+
+    with patch("tasks.entry_decision_preload_tasks.latest_required_price_date", return_value="2100-01-02"):
+        assert preload_tasks.get_preloaded_entry_decision("AMD", as_of_date="2100-01-01") is None
+
+
+def test_incomplete_after_close_payload_does_not_stick_in_current_cache_epoch():
+    payload = {
+        "symbol": "AMD",
+        "requested_as_of_date": "2100-01-02",
+        "as_of_date": "2100-01-01",
+        "meta": {
+            "full_decision_preloaded": True,
+            "context": _entry_context_meta(price_data_end_date="2100-01-01"),
+        },
+    }
+
+    with patch("tasks.entry_decision_preload_tasks.latest_required_price_date", return_value="2100-01-02"):
+        assert preload_tasks.store_preloaded_entry_decision("AMD", payload, as_of_date="2100-01-02")
+        assert preload_tasks.get_preloaded_entry_decision("AMD", as_of_date="2100-01-02") is None
+
+
+def test_one_session_stale_payload_still_needs_after_close_preload():
+    payload = {
+        "symbol": "AMD",
+        "requested_as_of_date": "2100-01-02",
+        "as_of_date": "2100-01-01",
+        "meta": {
+            "full_decision_preloaded": True,
+            "context": _entry_context_meta(price_data_end_date="2100-01-01"),
+        },
+    }
+
+    with patch("tasks.entry_decision_preload_tasks.latest_required_price_date", return_value="2100-01-02"):
+        assert preload_tasks.store_preloaded_entry_decision("AMD", payload, as_of_date="2100-01-02")
+
+        pending = preload_tasks._symbols_needing_preload(
+            ["AMD"],
+            as_of_date="2100-01-02",
+            full_only=True,
+        )
+        needs_full = preload_tasks._key_needs_full_preload_locked(("2100-01-02", "AMD", "2100-01-02"))
+
+    assert pending == ["AMD"]
+    assert needs_full is True
+
+
 def test_auto_preload_market_gate_blocks_after_chicago_close():
     after_close = preload_tasks._CHICAGO_TZ.localize(datetime(2026, 4, 16, 15, 1))
 
@@ -269,9 +334,21 @@ def test_preload_loads_one_alert_symbol_per_idle_pass():
                 "top_reasons": [],
                 "backtest_1y": {},
                 "chart_data": [],
+                "meta": {
+                    "full_decision_preloaded": True,
+                    "context": _entry_context_meta(symbols[0], price_data_end_date="2099-01-01"),
+                },
             }
         }
-        contexts = {symbols[0]: {"symbol": symbols[0], "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}}}
+        contexts = {
+            symbols[0]: {
+                "symbol": symbols[0],
+                "feature_df": object(),
+                "decisions_by_index": {},
+                "backtest_1y": {},
+                "meta": _entry_context_meta(symbols[0], price_data_end_date="2099-01-01"),
+            }
+        }
         return loaded, contexts, {}
 
     with (
@@ -577,7 +654,13 @@ def test_user_alert_payload_preload_starts_robust_alert_worker_immediately():
 
 def test_user_alert_payload_preload_inline_stores_reusable_context_for_date_changes():
     payload = {"timestamp": "2026-04-15 10:05:00", "alerts": [{"symbol": "UBER"}]}
-    context = {"symbol": "UBER", "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}}
+    context = {
+        "symbol": "UBER",
+        "feature_df": object(),
+        "decisions_by_index": {},
+        "backtest_1y": {},
+        "meta": _entry_context_meta("UBER", price_data_end_date="2099-01-01"),
+    }
 
     with (
         patch.dict(
@@ -598,6 +681,10 @@ def test_user_alert_payload_preload_inline_stores_reusable_context_for_date_chan
                 "horizons": {},
                 "backtest_1y": {},
                 "chart_data": [],
+                "meta": {
+                    "full_decision_preloaded": True,
+                    "context": _context["meta"],
+                },
             },
         ) as mock_build_payload,
         patch("tasks.entry_decision_preload_tasks._compute_preload_artifacts") as mock_lightweight,
@@ -622,7 +709,13 @@ def test_user_alert_payload_preload_inline_stores_reusable_context_for_date_chan
 
 def test_user_alert_payload_preload_uses_alert_timestamp_as_request_date():
     payload = {"timestamp": "2026-04-14 15:35:00", "alerts": [{"symbol": "UBER"}]}
-    context = {"symbol": "UBER", "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}}
+    context = {
+        "symbol": "UBER",
+        "feature_df": object(),
+        "decisions_by_index": {},
+        "backtest_1y": {},
+        "meta": _entry_context_meta("UBER", price_data_end_date="2099-01-01"),
+    }
 
     with (
         patch.dict(
@@ -643,6 +736,10 @@ def test_user_alert_payload_preload_uses_alert_timestamp_as_request_date():
                 "horizons": {},
                 "backtest_1y": {},
                 "chart_data": [],
+                "meta": {
+                    "full_decision_preloaded": True,
+                    "context": _context["meta"],
+                },
             },
         ) as mock_build_payload,
     ):
@@ -661,7 +758,13 @@ def test_user_alert_payload_preload_uses_alert_timestamp_as_request_date():
 
 
 def test_preloaded_context_renders_selected_date_without_new_worker_payload():
-    context = {"symbol": "AMD", "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}}
+    context = {
+        "symbol": "AMD",
+        "feature_df": object(),
+        "decisions_by_index": {},
+        "backtest_1y": {},
+        "meta": _entry_context_meta("AMD", price_data_end_date="2099-01-01"),
+    }
     with (
         patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
         patch(

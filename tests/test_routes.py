@@ -2,6 +2,7 @@
 
 import pytest
 from unittest.mock import patch
+from analysis.trade_entry_evaluation import entry_decision_feature_schema_version, entry_decision_model_version
 from app import create_app
 import tasks.daily_scan_tasks as daily_scan_tasks
 from tasks.entry_decision_preload_tasks import (
@@ -103,6 +104,14 @@ def test_summary_entry_decision_returns_preloaded_payload(mock_request_preload, 
             "top_reasons": [],
             "backtest_1y": {},
             "chart_data": [],
+            "meta": {
+                "context": {
+                    "price_data_end_date": "2099-01-01",
+                    "trained_through_date": "2099-01-01",
+                    "model_version": entry_decision_model_version(),
+                    "feature_schema_version": entry_decision_feature_schema_version(),
+                },
+            },
         },
         as_of_date="2026-04-15",
     )
@@ -121,7 +130,18 @@ def test_summary_entry_decision_returns_preloaded_payload(mock_request_preload, 
 @patch('routes.summary_routes.request_full_entry_decision_preload')
 def test_summary_entry_decision_renders_selected_date_from_cached_model_context(mock_request_preload, client):
     _reset_entry_decision_preload_state_for_tests()
-    context = {"symbol": "AMD", "feature_df": object(), "decisions_by_index": {}, "backtest_1y": {}}
+    context = {
+        "symbol": "AMD",
+        "feature_df": object(),
+        "decisions_by_index": {},
+        "backtest_1y": {},
+        "meta": {
+            "price_data_end_date": "2099-01-01",
+            "trained_through_date": "2099-01-01",
+            "model_version": entry_decision_model_version(),
+            "feature_schema_version": entry_decision_feature_schema_version(),
+        },
+    }
 
     with (
         patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),

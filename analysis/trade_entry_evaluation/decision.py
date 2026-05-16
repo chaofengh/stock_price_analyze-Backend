@@ -56,6 +56,43 @@ def _event_risk_for_horizon(event_risk: dict, horizon: int) -> dict:
     return horizon_risk
 
 
+def _key_reasons_for_horizon(horizon_payload: dict, limit: int = 4) -> list[dict]:
+    contributions = sorted(
+        horizon_payload.get("contributions", []) or [],
+        key=lambda item: abs(_safe_num(item.get("contribution"))),
+        reverse=True,
+    )
+    reasons: list[dict] = []
+    for index, item in enumerate(contributions[:limit], start=1):
+        reasons.append(
+            {
+                "rank": index,
+                "horizon": item.get("horizon"),
+                "feature": item.get("feature"),
+                "value": item.get("value"),
+                "impact": item.get("impact"),
+                "contribution": item.get("contribution"),
+            }
+        )
+    return reasons
+
+
+def _similar_cases_for_horizon(horizon_payload: dict, limit: int = 8) -> list[dict]:
+    playbook = horizon_payload.get("playbook") if isinstance(horizon_payload, dict) else None
+    neighbors = playbook.get("neighbors") if isinstance(playbook, dict) else None
+    if not isinstance(neighbors, list):
+        return []
+    return deepcopy(neighbors[:limit])
+
+
+def _attach_horizon_explanations(horizon_payload: dict) -> dict:
+    if not isinstance(horizon_payload, dict):
+        return horizon_payload
+    horizon_payload["key_reasons"] = _key_reasons_for_horizon(horizon_payload)
+    horizon_payload["similar_past_cases"] = _similar_cases_for_horizon(horizon_payload)
+    return horizon_payload
+
+
 def evaluate_row_decision(
     row: pd.Series,
     *,
@@ -69,6 +106,7 @@ def evaluate_row_decision(
 
     if not touched and not force_prediction:
         horizons = {f"{h}d": _no_prediction_horizon(h, "no_bollinger_touch") for h in _HORIZONS}
+        horizons = {key: _attach_horizon_explanations(value) for key, value in horizons.items()}
         event_risk["blocked_horizons"] = []
         event_risk["blocked"] = False
         return {
@@ -95,7 +133,7 @@ def evaluate_row_decision(
         else:
             horizon = _evaluate_horizon_from_context(feature_df, row_index, h)
             horizon["event_risk"] = horizon_event_risk
-        horizons[horizon_key] = horizon
+        horizons[horizon_key] = _attach_horizon_explanations(horizon)
 
     event_risk["blocked_horizons"] = blocked_horizons
     event_risk["blocked"] = bool(blocked_horizons)
