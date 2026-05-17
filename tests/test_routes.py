@@ -89,8 +89,9 @@ def test_summary_entry_decision_starts_preload_when_result_is_missing(mock_reque
     )
 
 
+@patch('routes.summary_routes.safe_sync_entry_signals_from_payload')
 @patch('routes.summary_routes.request_full_entry_decision_preload')
-def test_summary_entry_decision_returns_preloaded_payload(mock_request_preload, client):
+def test_summary_entry_decision_returns_preloaded_payload(mock_request_preload, mock_sync_signals, client):
     _reset_entry_decision_preload_state_for_tests()
     store_preloaded_entry_decision(
         "AMD",
@@ -124,11 +125,19 @@ def test_summary_entry_decision_returns_preloaded_payload(mock_request_preload, 
     assert data["requested_as_of_date"] == "2026-04-15"
     assert data["setup_type"] == "lower_band_touch"
     mock_request_preload.assert_not_called()
+    mock_sync_signals.assert_called_once()
+    assert mock_sync_signals.call_args.args[0] == "AMD"
+    assert mock_sync_signals.call_args.kwargs["source"] == "entry_decision_api"
     _reset_entry_decision_preload_state_for_tests()
 
 
+@patch('routes.summary_routes.safe_sync_entry_signals_from_payload')
 @patch('routes.summary_routes.request_full_entry_decision_preload')
-def test_summary_entry_decision_renders_selected_date_from_cached_model_context(mock_request_preload, client):
+def test_summary_entry_decision_renders_selected_date_from_cached_model_context(
+    mock_request_preload,
+    mock_sync_signals,
+    client,
+):
     _reset_entry_decision_preload_state_for_tests()
     context = {
         "symbol": "AMD",
@@ -168,6 +177,7 @@ def test_summary_entry_decision_renders_selected_date_from_cached_model_context(
     assert data["requested_as_of_date"] == "2026-04-10"
     mock_build_payload.assert_called_once_with(context, as_of_date="2026-04-10")
     mock_request_preload.assert_not_called()
+    mock_sync_signals.assert_called_once()
     _reset_entry_decision_preload_state_for_tests()
 
 

@@ -15,6 +15,7 @@ from database.connection import get_connection
 from database.create_user_table import create_users_table
 from database.create_ticker_table import create_tickers_table
 from database.create_lists_table import create_lists_and_list_tickers_tables
+from database.create_entry_decision_signals_table import create_entry_decision_signals_table
 
 # Load environment variables from .env (if exists)
 load_dotenv()
@@ -56,6 +57,7 @@ def db_setup(db_url):
     create_users_table()
     create_tickers_table()
     create_lists_and_list_tickers_tables()
+    create_entry_decision_signals_table()
 
 @pytest.fixture
 def db_connection(db_setup):

@@ -16,6 +16,7 @@ from tasks.entry_decision_preload_tasks import (
     refresh_entry_decision_preload_state,
     request_full_entry_decision_preload,
 )
+from tasks.entry_signal_tasks import safe_sync_entry_signals_from_payload
 from utils.serialization import convert_to_python_types
 
 summary_blueprint = Blueprint("summary", __name__)
@@ -189,6 +190,7 @@ def summary_entry_decision_endpoint():
                 if isinstance(preload_result, dict) and preload_result.get("reason") in _TEMPORARY_PRELOAD_REASONS:
                     preload_result = {**preload_result, "status": "loading"}
                 return _entry_decision_loading_response(symbol, as_of_date, preload_result)
+        safe_sync_entry_signals_from_payload(symbol, payload, source="entry_decision_api")
         return jsonify(payload), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400

@@ -35,6 +35,10 @@ from analysis.trade_entry_evaluation import (
     latest_required_price_date,
     refresh_payload_freshness,
 )
+from tasks.entry_signal_tasks import (
+    get_open_entry_signal_symbols,
+    safe_sync_entry_signals_from_payload,
+)
 from utils.serialization import convert_to_python_types
 
 logger = logging.getLogger(__name__)
@@ -107,6 +111,25 @@ def _startup_alert_preload_max_symbols() -> int:
 
 def _after_close_alert_preload_max_symbols() -> int:
     return _env_int("ENTRY_DECISION_AFTER_CLOSE_ALERT_PRELOAD_MAX_SYMBOLS", -1)
+
+
+def _after_close_open_signal_discovery_enabled() -> bool:
+    raw = os.getenv("ENTRY_DECISION_AFTER_CLOSE_OPEN_SIGNAL_DISCOVERY_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _after_close_open_signal_discovery_symbols(source: str) -> list[str]:
+    if source != "after_close" or not _after_close_open_signal_discovery_enabled():
+        return []
+    try:
+        from database.ticker_repository import get_all_tickers
+
+        return _normalize_symbols(get_all_tickers())
+    except Exception:
+        logger.exception("Open Entry Signal discovery ticker lookup failed.")
+        return []
 
 
 def _batch_size_for_pending(pending: list[str], max_symbols: int | None) -> int:
@@ -378,15 +401,15 @@ def _normalize_symbols(symbols: Iterable[str] | None) -> list[str]:
 def alert_symbols_from_payload(payload: dict | None) -> list[str]:
     if not isinstance(payload, dict):
         return []
-    alerts = payload.get("alerts") or []
     symbols = []
-    for alert in alerts:
-        if isinstance(alert, dict):
-            symbol = alert.get("symbol") or alert.get("ticker")
-        else:
-            symbol = alert
-        if symbol:
-            symbols.append(symbol)
+    for collection_key in ("alerts", "open_entry_signals"):
+        for item in payload.get(collection_key) or []:
+            if isinstance(item, dict):
+                symbol = item.get("symbol") or item.get("ticker")
+            else:
+                symbol = item
+            if symbol:
+                symbols.append(symbol)
     return _normalize_symbols(symbols)
 
 def mark_backend_request_started() -> None:
@@ -1015,11 +1038,15 @@ def _store_worker_results(
     contexts: dict[str, dict] | None = None,
 ) -> dict:
     loaded: list[str] = []
+    signal_sync: dict[str, dict] = {}
     for symbol, context in (contexts or {}).items():
         store_entry_decision_context(symbol, context)
 
     for symbol, payload in loaded_payloads.items():
         store_preloaded_entry_decision(symbol, payload, as_of_date=as_of_date)
+        sync_result = safe_sync_entry_signals_from_payload(symbol, payload, source=source)
+        if sync_result.get("status") != "skipped":
+            signal_sync[symbol] = sync_result
         loaded.append(symbol)
 
     if source in ("background", "startup", "after_close") and "__global__" in failed:
@@ -1033,12 +1060,15 @@ def _store_worker_results(
         logger.debug("Entry decision preload skipped for %s: %s", symbol, failed[symbol])
 
     if loaded:
-        return {
+        result = {
             "status": "loaded",
             "loaded": len(loaded),
             "symbols": loaded,
             "failed": failed,
         }
+        if signal_sync:
+            result["entry_signal_sync"] = signal_sync
+        return result
     if failed:
         return {"status": "error", "loaded": 0, "failed": failed}
     return {"status": "ready", "loaded": 0, "symbols": []}
@@ -1327,6 +1357,14 @@ def _preload_entry_decisions_from_alert_payload_locked(
     as_of_date: str | None = None,
 ) -> dict:
     symbols = alert_symbols_from_payload(alert_payload)
+    if source in ("background", "startup", "after_close"):
+        symbols = _normalize_symbols(
+            [
+                *symbols,
+                *get_open_entry_signal_symbols(),
+                *_after_close_open_signal_discovery_symbols(source),
+            ]
+        )
     if not symbols:
         return {"status": "skipped", "reason": "no_alert_symbols", "symbols": []}
 
@@ -1360,15 +1398,20 @@ def preload_entry_decisions_from_alert_payload(
     *,
     max_symbols: int | None = None,
     min_idle_seconds: float | None = 0,
+    respect_market_gate: bool = False,
 ) -> dict:
     timeout_seconds = DEFAULT_WORKER_TIMEOUT_SECONDS
     if not _preload_lock.acquire(blocking=False):
         return {"status": "skipped", "reason": "preload_coordinator_busy"}
 
     try:
-        market_gate = _auto_preload_market_gate()
+        market_gate = (
+            _auto_preload_market_gate()
+            if respect_market_gate
+            else {"allowed": True, "reason": "market_gate_bypassed"}
+        )
         terminated_worker = None
-        if not market_gate.get("allowed", False):
+        if respect_market_gate and not market_gate.get("allowed", False):
             terminated_worker = _terminate_noninteractive_worker_for_market_gate(
                 market_gate.get("reason", "market_closed")
             )

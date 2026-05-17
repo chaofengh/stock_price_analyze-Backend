@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+from analysis.trade_entry_evaluation import entry_decision_feature_schema_version, entry_decision_model_version
 from tasks.entry_decision_preload_tasks import _reset_entry_decision_preload_state_for_tests
 
 # Import the function under test.
@@ -12,10 +13,19 @@ def test_alerts_latest_returns_payload_shape(client):
     with (
         patch("routes.alerts_routes.get_latest_scan_result", return_value=payload),
         patch("routes.alerts_routes.get_all_tickers", return_value=["AAPL"]),
+        patch(
+            "routes.alerts_routes.list_open_entry_signals",
+            return_value=[{"symbol": "AAPL", "signal_date": "2026-04-04", "horizon_days": 5}],
+        ),
+        patch(
+            "routes.alerts_routes.build_open_entry_signal_stories",
+            return_value=[{"symbol": "AAPL", "headline": "AAPL has open model signals"}],
+        ) as mock_stories,
         patch("routes.alerts_routes.preload_entry_decisions_from_alert_payload") as mock_preload,
         patch("routes.alerts_routes.authenticate_bearer_token") as mock_auth,
     ):
         mock_auth.return_value = type("Auth", (), {"user_id": 1})()
+        mock_preload.return_value = {"status": "ready", "loaded": 0}
         response = client.get("/api/alerts/latest", headers={"Authorization": "Bearer test"})
 
     assert response.status_code == 200
@@ -24,7 +34,17 @@ def test_alerts_latest_returns_payload_shape(client):
     assert data["meta"]["next_run_at"] == payload["meta"]["next_run_at"]
     assert data["meta"]["is_official"] is True
     assert data["alerts"] == [{"symbol": "AAPL"}]
-    mock_preload.assert_called_once_with(data)
+    assert data["open_entry_signals"] == [{"symbol": "AAPL", "signal_date": "2026-04-04", "horizon_days": 5}]
+    assert data["open_entry_signal_stories"] == [{"symbol": "AAPL", "headline": "AAPL has open model signals"}]
+    assert data["entry_decision_preload"] == {"status": "ready", "loaded": 0}
+    assert mock_stories.call_args.args[0] == [
+        {"symbol": "AAPL", "signal_date": "2026-04-04", "horizon_days": 5}
+    ]
+    mock_preload.assert_called_once()
+    assert mock_preload.call_args.args[0]["alerts"] == [{"symbol": "AAPL"}]
+    assert mock_preload.call_args.args[0]["open_entry_signals"] == [
+        {"symbol": "AAPL", "signal_date": "2026-04-04", "horizon_days": 5}
+    ]
 
 
 def test_alerts_stream(client):
@@ -37,7 +57,8 @@ def test_alerts_stream(client):
             return_value={"timestamp": "2023-01-01 10:00:00", "alerts": []},
         ),
         patch("routes.alerts_routes.get_all_tickers", return_value=[]),
-        patch("routes.alerts_routes.preload_entry_decisions_from_alert_payload"),
+        patch("routes.alerts_routes.list_open_entry_signals", return_value=[]),
+        patch("routes.alerts_routes.preload_entry_decisions_from_alert_payload", return_value={"status": "ready"}),
         patch("routes.alerts_routes.authenticate_bearer_token") as mock_auth,
     ):
         mock_auth.return_value = type("Auth", (), {"user_id": 1})()
@@ -58,12 +79,23 @@ def test_alert_filter_uses_symbol_key():
             {"symbol": None},
         ],
     }
-    with patch("routes.alerts_routes.get_all_tickers", return_value=["meta", "TSLA"]):
+    with (
+        patch("routes.alerts_routes.get_all_tickers", return_value=["meta", "TSLA"]),
+        patch("routes.alerts_routes.list_open_entry_signals", return_value=[{"symbol": "TSLA"}]),
+        patch(
+            "routes.alerts_routes.build_open_entry_signal_stories",
+            return_value=[{"symbol": "TSLA", "headline": "TSLA has open model signals"}],
+        ),
+    ):
         from routes.alerts_routes import _filter_for_user
 
         filtered = _filter_for_user(result, user_id=1)
 
     assert [a.get("symbol") or a.get("ticker") for a in filtered["alerts"]] == ["META", "tsla"]
+    assert filtered["open_entry_signals"] == [{"symbol": "TSLA"}]
+    assert filtered["open_entry_signal_stories"] == [
+        {"symbol": "TSLA", "headline": "TSLA has open model signals"}
+    ]
 
 
 def test_alerts_latest_preloads_visible_ticker_and_entry_endpoint_returns_cached_result(client):
@@ -80,6 +112,11 @@ def test_alerts_latest_preloads_visible_ticker_and_entry_endpoint_returns_cached
             "feature_df": object(),
             "decisions_by_index": {},
             "backtest_1y": {},
+            "meta": {
+                "model_version": entry_decision_model_version(),
+                "feature_schema_version": entry_decision_feature_schema_version(),
+                "price_data_end_date": "2100-01-01",
+            },
         }
 
     def _entry_decision(context, as_of_date=None):
@@ -92,6 +129,10 @@ def test_alerts_latest_preloads_visible_ticker_and_entry_endpoint_returns_cached
             "top_reasons": [],
             "backtest_1y": {},
             "chart_data": [],
+            "meta": {
+                "full_decision_preloaded": True,
+                "context": context["meta"],
+            },
         }
 
     try:
@@ -117,6 +158,11 @@ def test_alerts_latest_preloads_visible_ticker_and_entry_endpoint_returns_cached
             ) as mock_entry,
             patch("routes.alerts_routes.get_latest_scan_result", return_value=payload),
             patch("routes.alerts_routes.get_all_tickers", return_value=["UBER", "AMD"]),
+            patch("routes.alerts_routes.list_open_entry_signals", return_value=[]),
+            patch(
+                "tasks.entry_decision_preload_tasks.safe_sync_entry_signals_from_payload",
+                return_value={"status": "synced"},
+            ),
             patch("routes.alerts_routes.authenticate_bearer_token") as mock_auth,
         ):
             mock_auth.return_value = type("Auth", (), {"user_id": 1})()

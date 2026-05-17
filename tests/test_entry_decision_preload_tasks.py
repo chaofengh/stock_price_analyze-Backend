@@ -40,10 +40,14 @@ def test_alert_symbols_from_payload_normalizes_and_dedupes():
             {"symbol": "AMD"},
             "nvda",
             {},
-        ]
+        ],
+        "open_entry_signals": [
+            {"symbol": "aapl"},
+            {"ticker": "MU"},
+        ],
     }
 
-    assert preload_tasks.alert_symbols_from_payload(payload) == ["AMD", "MU", "NVDA"]
+    assert preload_tasks.alert_symbols_from_payload(payload) == ["AMD", "MU", "NVDA", "AAPL"]
 
 
 def test_default_worker_timeout_allows_realistic_cold_entry_model_runtime():
@@ -175,7 +179,7 @@ def test_background_preload_skips_after_market_close_without_starting_work():
     mock_compute.assert_not_called()
 
 
-def test_alert_payload_preload_skips_after_market_close_without_queueing():
+def test_alert_payload_preload_skips_after_market_close_when_market_gate_is_requested():
     payload = {"timestamp": "2026-04-15 10:05:00", "alerts": [{"symbol": "UBER"}]}
 
     with (
@@ -190,7 +194,11 @@ def test_alert_payload_preload_skips_after_market_close_without_queueing():
         ),
         patch("tasks.entry_decision_preload_tasks._start_preload_worker") as mock_start,
     ):
-        result = preload_tasks.preload_entry_decisions_from_alert_payload(payload, min_idle_seconds=0)
+        result = preload_tasks.preload_entry_decisions_from_alert_payload(
+            payload,
+            min_idle_seconds=0,
+            respect_market_gate=True,
+        )
 
     assert result == {
         "status": "skipped",
@@ -200,6 +208,23 @@ def test_alert_payload_preload_skips_after_market_close_without_queueing():
     assert preload_tasks._alert_preload_queue == []
     assert preload_tasks._alert_preload_queued == set()
     mock_start.assert_not_called()
+
+
+def test_user_alert_payload_preload_bypasses_market_gate_by_default():
+    payload = {"timestamp": "2026-04-15 16:35:00", "alerts": [{"symbol": "UBER"}]}
+
+    with (
+        patch.dict(os.environ, {"ENTRY_DECISION_PRELOAD_FULL_ENABLED": "1"}),
+        patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
+        patch("tasks.entry_decision_preload_tasks._auto_preload_market_gate") as mock_gate,
+        patch("tasks.entry_decision_preload_tasks._start_preload_worker") as mock_start,
+    ):
+        result = preload_tasks.preload_entry_decisions_from_alert_payload(payload, min_idle_seconds=0)
+
+    assert result["status"] == "started"
+    assert result["symbols"] == ["UBER"]
+    mock_gate.assert_not_called()
+    mock_start.assert_called_once_with(["UBER"], "2026-04-15", source="alert")
 
 
 def test_market_close_gate_terminates_running_noninteractive_worker():
@@ -495,6 +520,7 @@ def test_preload_scheduler_starts_worker_and_returns_immediately():
     with (
         patch.dict(os.environ, {"ENTRY_DECISION_PRELOAD_FULL_ENABLED": "1"}),
         patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
+        patch("tasks.entry_decision_preload_tasks.get_open_entry_signal_symbols", return_value=[]),
         patch("tasks.entry_decision_preload_tasks._start_preload_worker") as mock_start,
         patch("tasks.entry_decision_preload_tasks._compute_preload_artifacts") as mock_compute,
     ):
@@ -506,6 +532,27 @@ def test_preload_scheduler_starts_worker_and_returns_immediately():
     assert result == {"status": "started", "symbols": ["AMD"]}
     mock_start.assert_called_once_with(["AMD"], "2026-04-15", source="background")
     mock_compute.assert_not_called()
+
+
+def test_after_close_preload_discovers_open_signals_across_tracked_tickers():
+    payload = {"timestamp": "2026-04-15 15:35:00", "alerts": [{"symbol": "AMD"}]}
+
+    with (
+        patch.dict(os.environ, {"ENTRY_DECISION_PRELOAD_FULL_ENABLED": "1"}),
+        patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
+        patch("tasks.entry_decision_preload_tasks.get_open_entry_signal_symbols", return_value=["AAPL"]),
+        patch("database.ticker_repository.get_all_tickers", return_value=["MSFT", "AMD"]),
+        patch("tasks.entry_decision_preload_tasks._start_preload_worker") as mock_start,
+    ):
+        result = preload_tasks._preload_entry_decisions_from_alert_payload_locked(
+            payload,
+            max_symbols=-1,
+            source="after_close",
+            as_of_date="2026-04-15",
+        )
+
+    assert result == {"status": "started", "symbols": ["AMD", "AAPL", "MSFT"]}
+    mock_start.assert_called_once_with(["AMD", "AAPL", "MSFT"], "2026-04-15", source="after_close")
 
 
 def test_preload_scheduler_default_batch_warms_two_alert_symbols():
@@ -545,6 +592,8 @@ def test_after_close_preload_bypasses_market_gate_and_warms_all_alert_symbols():
         ),
         patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-04-15"),
         patch("tasks.entry_decision_preload_tasks._auto_preload_market_gate") as mock_gate,
+        patch("tasks.entry_decision_preload_tasks.get_open_entry_signal_symbols", return_value=[]),
+        patch("database.ticker_repository.get_all_tickers", return_value=[]),
         patch("tasks.entry_decision_preload_tasks._start_preload_worker") as mock_start,
     ):
         result = preload_tasks.refresh_entry_decisions_for_latest_alerts_after_close()
