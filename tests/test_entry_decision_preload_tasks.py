@@ -806,6 +806,52 @@ def test_user_alert_payload_preload_uses_alert_timestamp_as_request_date():
     ]
 
 
+def test_user_alert_payload_ready_cache_resyncs_entry_signals():
+    alert_payload = {"timestamp": "2026-05-20 13:21:43", "open_entry_signals": [{"symbol": "AAPL"}]}
+    cached_payload = {
+        "symbol": "AAPL",
+        "as_of_date": "2026-05-20",
+        "horizons": {},
+        "backtest_1y": {
+            "10d": {
+                "open_predictions": [
+                    {"signal_date": "2026-05-06", "horizon_days": 10, "predicted_direction": "long"},
+                    {"signal_date": "2026-05-07", "horizon_days": 10, "predicted_direction": "long"},
+                    {"signal_date": "2026-05-08", "horizon_days": 10, "predicted_direction": "short"},
+                    {"signal_date": "2026-05-11", "horizon_days": 10, "predicted_direction": "short"},
+                ],
+                "predictions": [],
+            }
+        },
+        "chart_data": [],
+        "meta": {
+            "full_decision_preloaded": True,
+            "context": _entry_context_meta("AAPL", price_data_end_date="2026-05-20"),
+        },
+    }
+
+    sync_result = {"status": "synced", "symbol": "AAPL", "open": 4, "closed": 1}
+    with (
+        patch.dict(os.environ, {"ENTRY_DECISION_PRELOAD_FULL_ENABLED": "1"}),
+        patch("tasks.entry_decision_preload_tasks._cache_day", return_value="2026-05-20"),
+        patch("tasks.entry_decision_preload_tasks.safe_sync_entry_signals_from_payload", return_value=sync_result) as mock_sync,
+    ):
+        preload_tasks.store_preloaded_entry_decision("AAPL", cached_payload, as_of_date="2026-05-20")
+        result = preload_tasks.preload_entry_decisions_from_alert_payload(alert_payload, min_idle_seconds=0)
+
+    assert result == {
+        "status": "ready",
+        "loaded": 0,
+        "symbols": ["AAPL"],
+        "entry_signal_sync": {"AAPL": sync_result},
+    }
+    assert mock_sync.call_count == 1
+    sync_args, sync_kwargs = mock_sync.call_args
+    assert sync_args[0] == "AAPL"
+    assert sync_args[1]["as_of_date"] == "2026-05-20"
+    assert sync_kwargs == {"source": "alert"}
+
+
 def test_preloaded_context_renders_selected_date_without_new_worker_payload():
     context = {
         "symbol": "AMD",

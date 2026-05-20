@@ -161,6 +161,24 @@ def _side_sign(touched_side: str | None) -> float:
     return 0.0
 
 
+def _trade_direction_for_model_direction(
+    touched_side: str | None,
+    model_direction: str | None,
+) -> str | None:
+    if model_direction in ("long", "short"):
+        return model_direction
+    if model_direction == "flat":
+        return "flat"
+    if model_direction not in ("continuation", "reversal"):
+        return None
+
+    side_sign = _side_sign(touched_side)
+    if abs(side_sign) <= _EPS:
+        return None
+    trade_sign = side_sign if model_direction == "continuation" else -side_sign
+    return "long" if trade_sign > 0 else "short"
+
+
 def _compute_signed_streak(returns: pd.Series) -> pd.Series:
     out: list[int] = []
     streak = 0

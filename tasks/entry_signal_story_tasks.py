@@ -31,19 +31,41 @@ def _date_text(value) -> str | None:
 
 
 def _direction_label(direction: str | None) -> str:
-    if direction == "continuation":
-        return "Continuation"
-    if direction == "reversal":
-        return "Reversal"
+    if direction == "long":
+        return "Long"
+    if direction == "short":
+        return "Short"
     return "Unknown"
 
 
 def _direction_word(direction: str | None) -> str:
-    if direction == "continuation":
-        return "continuation"
-    if direction == "reversal":
-        return "reversal"
+    if direction == "long":
+        return "long"
+    if direction == "short":
+        return "short"
     return "mixed"
+
+
+def _trade_direction_from_model_direction(touched_side: str | None, direction: str | None) -> str | None:
+    if direction in ("long", "short"):
+        return direction
+    if direction not in ("continuation", "reversal"):
+        return None
+    if touched_side == "Upper":
+        return "long" if direction == "continuation" else "short"
+    if touched_side == "Lower":
+        return "short" if direction == "continuation" else "long"
+    return None
+
+
+def _signal_direction(signal: dict) -> str | None:
+    direction = signal.get("predicted_direction")
+    if direction in ("long", "short"):
+        return direction
+    trade_direction = signal.get("trade_direction")
+    if trade_direction in ("long", "short"):
+        return trade_direction
+    return _trade_direction_from_model_direction(signal.get("touched_side"), direction)
 
 
 def _format_price(value) -> str | None:
@@ -86,7 +108,7 @@ def _setup_key(signal: dict) -> str:
     return "|".join(
         [
             str(signal.get("horizon_days") or ""),
-            str(signal.get("predicted_direction") or ""),
+            str(_signal_direction(signal) or ""),
             str(signal.get("interim_status") or "open"),
         ]
     )
@@ -103,7 +125,7 @@ def _signal_sort_key(signal: dict) -> tuple[int, str, int]:
 
 
 def _build_setup(signals: list[dict]) -> dict | None:
-    usable = [signal for signal in signals if signal.get("predicted_direction") in {"continuation", "reversal"}]
+    usable = [signal for signal in signals if _signal_direction(signal) in {"long", "short"}]
     if not usable:
         return None
 
@@ -112,7 +134,7 @@ def _build_setup(signals: list[dict]) -> dict | None:
     remaining_values = [signal.get("remaining_sessions") for signal in ordered]
     remaining_numbers = [number for number in (_number(value) for value in remaining_values) if number is not None]
     horizon = _number(primary.get("horizon_days"))
-    direction = primary.get("predicted_direction")
+    direction = _signal_direction(primary)
     interim_status = primary.get("interim_status") or "open"
     signal_dates = [_date_text(signal.get("signal_date")) for signal in ordered]
     signal_dates = [value for value in signal_dates if value]
@@ -202,9 +224,9 @@ def _story_text(symbol: str, setups: list[dict]) -> tuple[str, str, str, str]:
     directions = {setup.get("predicted_direction") for setup in setups if setup.get("predicted_direction")}
     phrases = [_setup_phrase(setup) for setup in setups]
 
-    if {"continuation", "reversal"}.issubset(directions):
+    if {"long", "short"}.issubset(directions):
         primary = setups[0].get("predicted_direction")
-        opposing = "reversal" if primary == "continuation" else "continuation"
+        opposing = "short" if primary == "long" else "long"
         headline = (
             f"{symbol} has {_direction_word(primary)} support, but "
             f"{_direction_word(opposing)} risk is still open"
@@ -256,9 +278,9 @@ def build_open_entry_signal_stories(signals: Iterable[dict] | None) -> list[dict
 
         stance, headline, summary, watch = _story_text(symbol, setups)
         direction_signal_counts = Counter(
-            signal.get("predicted_direction")
+            _signal_direction(signal)
             for signal in symbol_signals
-            if signal.get("predicted_direction") in {"continuation", "reversal"}
+            if _signal_direction(signal) in {"long", "short"}
         )
         current_close = next(
             (signal.get("current_close") for signal in symbol_signals if _number(signal.get("current_close")) is not None),

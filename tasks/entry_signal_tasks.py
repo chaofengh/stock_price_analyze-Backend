@@ -5,6 +5,7 @@ from typing import Iterable
 
 from analysis.data_fetcher_utils import normalize_symbol
 from database.entry_signal_repository import (
+    close_open_entry_signals_absent_from_keys,
     get_open_entry_signal_symbols as _repo_open_symbols,
     list_open_entry_signal_keys,
     list_open_entry_signals as _repo_list_open_signals,
@@ -29,6 +30,35 @@ def _horizon_days_from_key(horizon_key: str, fallback=None) -> int | None:
             return int(fallback)
         except (TypeError, ValueError):
             return None
+
+
+def _trade_direction_from_model_direction(touched_side: str | None, direction: str | None) -> str | None:
+    if direction in ("long", "short"):
+        return direction
+    if direction not in ("continuation", "reversal"):
+        return None
+    if touched_side == "Upper":
+        return "long" if direction == "continuation" else "short"
+    if touched_side == "Lower":
+        return "short" if direction == "continuation" else "long"
+    return None
+
+
+def _output_predicted_direction(prediction: dict) -> str | None:
+    direction = prediction.get("predicted_direction")
+    if direction in ("long", "short"):
+        return direction
+    trade_direction = prediction.get("trade_direction")
+    if trade_direction in ("long", "short"):
+        return trade_direction
+    return _trade_direction_from_model_direction(prediction.get("touched_side"), direction)
+
+
+def _output_actual_direction(prediction: dict, key: str) -> str | None:
+    direction = prediction.get(key)
+    if direction in ("long", "short", "flat"):
+        return direction
+    return _trade_direction_from_model_direction(prediction.get("touched_side"), direction)
 
 
 def _payload_context(payload: dict) -> dict:
@@ -65,6 +95,17 @@ def _current_horizon_details(payload: dict, horizon_days: int, signal_date: str 
     return horizon if isinstance(horizon, dict) else {}
 
 
+def _payload_horizon_days(payload: dict) -> set[int]:
+    horizons: set[int] = set()
+    for horizon_key, backtest in (payload.get("backtest_1y") or {}).items():
+        if not isinstance(backtest, dict):
+            continue
+        horizon_days = _horizon_days_from_key(horizon_key)
+        if horizon_days:
+            horizons.add(horizon_days)
+    return horizons
+
+
 def _signal_base(symbol: str, payload: dict, source: str) -> dict:
     context = _payload_context(payload)
     return {
@@ -80,8 +121,8 @@ def _signal_base(symbol: str, payload: dict, source: str) -> dict:
 def _row_from_open_prediction(symbol: str, payload: dict, horizon_key: str, prediction: dict, source: str) -> dict | None:
     horizon_days = _horizon_days_from_key(horizon_key, prediction.get("horizon_days"))
     signal_date = _date_text(prediction.get("signal_date"))
-    predicted_direction = prediction.get("predicted_direction")
-    if not horizon_days or not signal_date or predicted_direction not in ("continuation", "reversal"):
+    predicted_direction = _output_predicted_direction(prediction)
+    if not horizon_days or not signal_date or predicted_direction not in ("long", "short"):
         return None
 
     current_horizon = _current_horizon_details(payload, horizon_days, signal_date)
@@ -93,8 +134,9 @@ def _row_from_open_prediction(symbol: str, payload: dict, horizon_key: str, pred
         "status": "open",
         "touched_side": prediction.get("touched_side"),
         "predicted_direction": predicted_direction,
-        "trade_direction": prediction.get("trade_direction"),
+        "trade_direction": predicted_direction,
         "signal_close": prediction.get("signal_close"),
+        "prediction_end_date": _date_text(prediction.get("prediction_end_date")),
         "current_date": _date_text(prediction.get("current_date")),
         "current_close": prediction.get("current_close"),
         "outcome_date": None,
@@ -102,7 +144,7 @@ def _row_from_open_prediction(symbol: str, payload: dict, horizon_key: str, pred
         "elapsed_sessions": prediction.get("elapsed_sessions"),
         "remaining_sessions": prediction.get("remaining_sessions"),
         "progress": prediction.get("progress"),
-        "interim_direction": prediction.get("interim_direction"),
+        "interim_direction": _output_actual_direction(prediction, "interim_direction"),
         "interim_status": prediction.get("interim_status"),
         "actual_direction": None,
         "is_correct": None,
@@ -119,14 +161,15 @@ def _row_from_open_prediction(symbol: str, payload: dict, horizon_key: str, pred
         "signal_tier": prediction.get("signal_tier"),
         "key_reasons": current_horizon.get("key_reasons") if current_horizon else None,
         "playbook": playbook,
+        "price_window": prediction.get("price_window"),
     }
 
 
 def _row_from_closed_prediction(symbol: str, payload: dict, horizon_key: str, prediction: dict, source: str) -> dict | None:
     horizon_days = _horizon_days_from_key(horizon_key, prediction.get("horizon_days"))
     signal_date = _date_text(prediction.get("signal_date"))
-    predicted_direction = prediction.get("predicted_direction")
-    if not horizon_days or not signal_date or predicted_direction not in ("continuation", "reversal"):
+    predicted_direction = _output_predicted_direction(prediction)
+    if not horizon_days or not signal_date or predicted_direction not in ("long", "short"):
         return None
 
     return {
@@ -136,8 +179,9 @@ def _row_from_closed_prediction(symbol: str, payload: dict, horizon_key: str, pr
         "status": "closed",
         "touched_side": prediction.get("touched_side"),
         "predicted_direction": predicted_direction,
-        "trade_direction": prediction.get("trade_direction"),
+        "trade_direction": predicted_direction,
         "signal_close": prediction.get("signal_close"),
+        "prediction_end_date": _date_text(prediction.get("prediction_end_date") or prediction.get("outcome_date")),
         "current_date": _date_text(prediction.get("outcome_date")),
         "current_close": prediction.get("outcome_close"),
         "outcome_date": _date_text(prediction.get("outcome_date")),
@@ -145,9 +189,9 @@ def _row_from_closed_prediction(symbol: str, payload: dict, horizon_key: str, pr
         "elapsed_sessions": horizon_days,
         "remaining_sessions": 0,
         "progress": 1.0,
-        "interim_direction": prediction.get("actual_direction"),
+        "interim_direction": _output_actual_direction(prediction, "actual_direction"),
         "interim_status": "closed",
-        "actual_direction": prediction.get("actual_direction"),
+        "actual_direction": _output_actual_direction(prediction, "actual_direction"),
         "is_correct": prediction.get("is_correct"),
         "current_trade_return": prediction.get("trade_return"),
         "current_trade_return_atr": prediction.get("trade_return_atr"),
@@ -162,6 +206,7 @@ def _row_from_closed_prediction(symbol: str, payload: dict, horizon_key: str, pr
         "signal_tier": prediction.get("signal_tier"),
         "key_reasons": None,
         "playbook": None,
+        "price_window": prediction.get("price_window"),
     }
 
 
@@ -222,6 +267,13 @@ def sync_entry_signals_from_payload(symbol: str, payload: dict, *, source: str =
             continue
         upsert_entry_decision_signal(closed_row)
         closed += 1
+
+    closed += close_open_entry_signals_absent_from_keys(
+        normalized,
+        open_keys=open_keys,
+        horizon_days=_payload_horizon_days(payload),
+        current_date=_date_text(payload.get("as_of_date")),
+    )
 
     return {
         "status": "synced",

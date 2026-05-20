@@ -37,6 +37,43 @@ def test_get_unknown_route(client):
     assert response.status_code == 404
 
 
+def test_cors_preflight_accepts_configured_local_origins(monkeypatch):
+    monkeypatch.setenv("front_end_client_website", "http://localhost:3000, http://127.0.0.1:3000")
+    app = create_app(testing=False)
+    with app.test_client() as local_client:
+        response = local_client.open(
+            "/api/summary/entry-decision?symbol=AAPL",
+            method="OPTIONS",
+            headers={
+                "Origin": "http://127.0.0.1:3000",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "Authorization",
+                "Access-Control-Request-Private-Network": "true",
+            },
+        )
+
+    assert response.status_code == 204
+    assert response.headers["Access-Control-Allow-Origin"] == "http://127.0.0.1:3000"
+    assert "Authorization" in response.headers["Access-Control-Allow-Headers"]
+    assert "GET" in response.headers["Access-Control-Allow-Methods"]
+    assert response.headers["Access-Control-Allow-Private-Network"] == "true"
+
+
+def test_cors_headers_are_added_to_api_error_responses(monkeypatch):
+    monkeypatch.delenv("front_end_client_website", raising=False)
+    monkeypatch.delenv("FRONT_END_CLIENT_WEBSITE", raising=False)
+    app = create_app(testing=False)
+    with app.test_client() as local_client:
+        response = local_client.get(
+            "/api/alerts/latest",
+            headers={"Origin": "http://192.168.1.25:3000"},
+        )
+
+    assert response.status_code == 401
+    assert response.headers["Access-Control-Allow-Origin"] == "http://192.168.1.25:3000"
+    assert "Authorization" in response.headers["Access-Control-Allow-Headers"]
+
+
 @patch('routes.summary_routes.get_summary_peers')
 def test_summary_peers_returns_payload(mock_peers, client):
     mock_peers.return_value = {

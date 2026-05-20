@@ -1,3 +1,5 @@
+from datetime import date, datetime
+
 import numpy as np
 import pandas as pd
 
@@ -15,6 +17,8 @@ def convert_to_python_types(obj):
         return float(obj)
     elif isinstance(obj, pd.Timestamp):
         # Convert Timestamps to string (ISO 8601 format, for example)
+        return obj.isoformat()
+    elif isinstance(obj, (datetime, date)):
         return obj.isoformat()
     else:
         return obj

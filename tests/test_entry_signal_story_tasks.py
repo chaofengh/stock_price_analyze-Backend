@@ -30,7 +30,7 @@ def test_open_entry_signal_story_keeps_every_active_setup_visible():
             _signal(
                 signal_date="2026-05-11",
                 horizon_days=5,
-                predicted_direction="continuation",
+                predicted_direction="long",
                 interim_status="working",
                 remaining_sessions=1,
                 signal_close=292.68,
@@ -39,7 +39,7 @@ def test_open_entry_signal_story_keeps_every_active_setup_visible():
             _signal(
                 signal_date="2026-05-04",
                 horizon_days=10,
-                predicted_direction="continuation",
+                predicted_direction="long",
                 interim_status="working",
                 remaining_sessions=1,
                 signal_close=276.58,
@@ -48,7 +48,7 @@ def test_open_entry_signal_story_keeps_every_active_setup_visible():
             _signal(
                 signal_date="2026-05-06",
                 horizon_days=10,
-                predicted_direction="continuation",
+                predicted_direction="long",
                 interim_status="working",
                 remaining_sessions=3,
                 signal_close=287.25,
@@ -57,7 +57,7 @@ def test_open_entry_signal_story_keeps_every_active_setup_visible():
             _signal(
                 signal_date="2026-05-07",
                 horizon_days=10,
-                predicted_direction="continuation",
+                predicted_direction="long",
                 interim_status="working",
                 remaining_sessions=4,
                 signal_close=287.18,
@@ -66,7 +66,7 @@ def test_open_entry_signal_story_keeps_every_active_setup_visible():
             _signal(
                 signal_date="2026-05-08",
                 horizon_days=10,
-                predicted_direction="reversal",
+                predicted_direction="short",
                 interim_status="against",
                 remaining_sessions=5,
                 signal_close=293.05,
@@ -75,7 +75,7 @@ def test_open_entry_signal_story_keeps_every_active_setup_visible():
             _signal(
                 signal_date="2026-05-11",
                 horizon_days=10,
-                predicted_direction="reversal",
+                predicted_direction="short",
                 interim_status="against",
                 remaining_sessions=6,
                 signal_close=292.68,
@@ -88,9 +88,9 @@ def test_open_entry_signal_story_keeps_every_active_setup_visible():
     story = stories[0]
     assert story["symbol"] == "AAPL"
     assert story["stance"] == "mixed"
-    assert story["headline"] == "AAPL has continuation support, but reversal risk is still open"
-    assert story["summary"] == "Open setups: 5D Continuation, 10D Continuation, and 10D Reversal."
-    assert story["direction_signal_counts"] == {"continuation": 4, "reversal": 2}
+    assert story["headline"] == "AAPL has long support, but short risk is still open"
+    assert story["summary"] == "Open setups: 5D Long, 10D Long, and 10D Short."
+    assert story["direction_signal_counts"] == {"long": 4, "short": 2}
     assert story["remaining_summary"] == "1-6 sessions left"
 
     setups = story["setups"]
@@ -100,9 +100,9 @@ def test_open_entry_signal_story_keeps_every_active_setup_visible():
         ("Opposing risk", "risk"),
     ]
     assert [(setup["horizon_days"], setup["predicted_direction"]) for setup in setups] == [
-        (5, "continuation"),
-        (10, "continuation"),
-        (10, "reversal"),
+        (5, "long"),
+        (10, "long"),
+        (10, "short"),
     ]
 
     ten_day_continue = setups[1]

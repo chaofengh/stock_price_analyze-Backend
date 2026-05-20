@@ -16,9 +16,24 @@ from .quality import (
     _finalize_deployment_quality,
 )
 
+_OPEN_PREDICTION_CHART_LOOKBACK_SESSIONS = 45
+
 def _chart_float(value: Any) -> float | None:
     num = _safe_num(value, np.nan)
     return float(num) if np.isfinite(num) else None
+
+
+def _chart_row_payload(row: pd.Series) -> dict:
+    return {
+        "date": _to_date_string(row.get("date")),
+        "open": _chart_float(row.get("open")),
+        "high": _chart_float(row.get("high")),
+        "low": _chart_float(row.get("low")),
+        "close": _chart_float(row.get("close")),
+        "upper": _chart_float(row.get("BB_upper")),
+        "lower": _chart_float(row.get("BB_lower")),
+        "isTouch": row.get("touched_side") in ("Upper", "Lower"),
+    }
 
 
 def _build_entry_chart_data(feature_df: pd.DataFrame) -> list[dict]:
@@ -29,19 +44,28 @@ def _build_entry_chart_data(feature_df: pd.DataFrame) -> list[dict]:
     chart_df = feature_df[pd.to_datetime(feature_df["date"]) >= start_date]
     out: list[dict] = []
     for _, row in chart_df.iterrows():
-        out.append(
-            {
-                "date": _to_date_string(row.get("date")),
-                "open": _chart_float(row.get("open")),
-                "high": _chart_float(row.get("high")),
-                "low": _chart_float(row.get("low")),
-                "close": _chart_float(row.get("close")),
-                "upper": _chart_float(row.get("BB_upper")),
-                "lower": _chart_float(row.get("BB_lower")),
-                "isTouch": row.get("touched_side") in ("Upper", "Lower"),
-            }
-        )
+        out.append(_chart_row_payload(row))
     return out
+
+
+def _prediction_end_date(feature_df: pd.DataFrame, idx: int, horizon: int) -> str | None:
+    if feature_df.empty or idx < 0 or idx >= len(feature_df):
+        return None
+    outcome_idx = idx + horizon
+    if outcome_idx < len(feature_df):
+        return _to_date_string(feature_df.iloc[outcome_idx].get("date"))
+    signal_date = pd.Timestamp(feature_df.iloc[idx].get("date")).normalize()
+    if pd.isna(signal_date):
+        return None
+    return (signal_date + pd.offsets.BDay(horizon)).strftime("%Y-%m-%d")
+
+
+def _open_prediction_price_window(feature_df: pd.DataFrame, idx: int) -> list[dict]:
+    if feature_df.empty or idx < 0 or idx >= len(feature_df):
+        return []
+    start_idx = max(0, idx - _OPEN_PREDICTION_CHART_LOOKBACK_SESSIONS)
+    window_df = feature_df.iloc[start_idx:].copy()
+    return [_chart_row_payload(row) for _, row in window_df.iterrows()]
 
 
 def _feature_frame_through_index(feature_df: pd.DataFrame, resolved_idx: int) -> pd.DataFrame:
@@ -210,6 +234,7 @@ def _open_prediction_row(
     return {
         "status": "open",
         "signal_date": _to_date_string(row.get("date")),
+        "prediction_end_date": _prediction_end_date(feature_df, idx, horizon),
         "current_date": _to_date_string(current_row.get("date")),
         "outcome_date": None,
         "horizon_days": horizon,
@@ -245,6 +270,7 @@ def _open_prediction_row(
         "signal_model_id": playbook.get("id") or (playbook.get("profile") or {}).get("id"),
         "signal_precision": playbook.get("precision"),
         "signal_tier": playbook.get("tier") or (playbook.get("profile") or {}).get("tier"),
+        "price_window": _open_prediction_price_window(feature_df, idx),
     }
 
 
@@ -299,6 +325,198 @@ def _build_open_predictions_by_horizon(
             )
 
     return open_by_horizon
+
+
+def _trade_probability_fields(item: dict, touched_side: str | None) -> dict:
+    if touched_side not in ("Upper", "Lower"):
+        return {}
+    continuation = item.get("continuation_probability")
+    reversal = item.get("reversal_probability")
+    continuation_score = item.get("continuation_confidence_score")
+    reversal_score = item.get("reversal_confidence_score")
+    continuation_precision = item.get("continuation_validation_precision")
+    reversal_precision = item.get("reversal_validation_precision")
+    continuation_count = item.get("continuation_validation_count")
+    reversal_count = item.get("reversal_validation_count")
+
+    if touched_side == "Upper":
+        return {
+            "long_probability": continuation,
+            "short_probability": reversal,
+            "long_confidence_score": continuation_score,
+            "short_confidence_score": reversal_score,
+            "long_validation_precision": continuation_precision,
+            "short_validation_precision": reversal_precision,
+            "long_validation_count": continuation_count,
+            "short_validation_count": reversal_count,
+        }
+    return {
+        "long_probability": reversal,
+        "short_probability": continuation,
+        "long_confidence_score": reversal_score,
+        "short_confidence_score": continuation_score,
+        "long_validation_precision": reversal_precision,
+        "short_validation_precision": continuation_precision,
+        "long_validation_count": reversal_count,
+        "short_validation_count": continuation_count,
+    }
+
+
+def _present_directional_value(item: dict, key: str, touched_side: str | None) -> None:
+    value = item.get(key)
+    setup_key = key.replace("_direction", "_setup_direction")
+    if value in ("continuation", "reversal", "flat"):
+        item[setup_key] = value
+        item[key] = _trade_direction_for_model_direction(touched_side, value)
+    elif key == "predicted_direction" and item.get("trade_direction") in ("long", "short"):
+        item[key] = item.get("trade_direction")
+
+
+def _present_reason(item: dict, touched_side: str | None) -> dict:
+    out = deepcopy(item)
+    _present_directional_value(out, "predicted_direction", touched_side)
+    direction = out.get("direction")
+    if direction in ("continuation", "reversal", "flat"):
+        out["setup_direction"] = direction
+        out["direction"] = _trade_direction_for_model_direction(touched_side, direction)
+    impact = out.get("impact")
+    if impact in ("continuation", "reversal", "flat"):
+        out["setup_impact"] = impact
+        out["impact"] = _trade_direction_for_model_direction(touched_side, impact)
+    return out
+
+
+def _present_playbook(item: Any, touched_side: str | None) -> Any:
+    if not isinstance(item, dict):
+        return item
+    out = deepcopy(item)
+    direction = out.get("direction")
+    if direction in ("continuation", "reversal"):
+        out["setup_direction"] = direction
+        out["direction"] = _trade_direction_for_model_direction(touched_side, direction)
+    out["neighbors"] = [
+        _present_prediction_row(neighbor, neighbor.get("touched_side") or touched_side)
+        for neighbor in out.get("neighbors") or []
+        if isinstance(neighbor, dict)
+    ]
+    return out
+
+
+def _present_prediction_row(item: dict, touched_side: str | None = None) -> dict:
+    out = deepcopy(item)
+    row_side = out.get("touched_side") or touched_side
+    for key in ("predicted_direction", "actual_direction", "interim_direction"):
+        _present_directional_value(out, key, row_side)
+    out.update(_trade_probability_fields(out, row_side))
+    if out.get("trade_direction") in ("long", "short"):
+        out["predicted_direction"] = out["trade_direction"]
+    elif out.get("predicted_direction") in ("long", "short"):
+        out["trade_direction"] = out["predicted_direction"]
+    return out
+
+
+def _present_horizon_decision(item: dict, touched_side: str | None) -> dict:
+    out = _present_prediction_row(item, touched_side)
+    if isinstance(out.get("blocked_prediction"), dict):
+        out["blocked_prediction"] = _present_prediction_row(out["blocked_prediction"], touched_side)
+    if isinstance(out.get("analog_evidence"), dict):
+        analog = deepcopy(out["analog_evidence"])
+        direction = analog.get("direction")
+        if direction in ("continuation", "reversal"):
+            analog["setup_direction"] = direction
+            analog["direction"] = _trade_direction_for_model_direction(touched_side, direction)
+        out["analog_evidence"] = analog
+    out["adaptive_candidates"] = [
+        _present_reason(candidate, touched_side)
+        for candidate in out.get("adaptive_candidates") or []
+        if isinstance(candidate, dict)
+    ]
+    out["contributions"] = [
+        _present_reason(reason, touched_side)
+        for reason in out.get("contributions") or []
+        if isinstance(reason, dict)
+    ]
+    out["key_reasons"] = [
+        _present_reason(reason, touched_side)
+        for reason in out.get("key_reasons") or []
+        if isinstance(reason, dict)
+    ]
+    out["similar_past_cases"] = [
+        _present_prediction_row(case, case.get("touched_side") or touched_side)
+        for case in out.get("similar_past_cases") or []
+        if isinstance(case, dict)
+    ]
+    out["playbook"] = _present_playbook(out.get("playbook"), touched_side)
+    return out
+
+
+def _trade_direction_metrics(predictions: list[dict], direction: str) -> dict:
+    rows = [item for item in predictions if item.get("predicted_direction") == direction]
+    correct = sum(1 for item in rows if item.get("is_correct"))
+    return {
+        f"{direction}_call_count": len(rows),
+        f"{direction}_correct_count": correct,
+        f"{direction}_accuracy": round(correct / len(rows), 6) if rows else None,
+    }
+
+
+def _present_backtest_result(item: dict) -> dict:
+    out = deepcopy(item)
+    predictions = [
+        _present_prediction_row(prediction)
+        for prediction in out.get("predictions") or []
+        if isinstance(prediction, dict)
+    ]
+    recent_predictions = [
+        _present_prediction_row(prediction)
+        for prediction in out.get("recent_predictions") or []
+        if isinstance(prediction, dict)
+    ]
+    open_predictions = [
+        _present_prediction_row(prediction)
+        for prediction in out.get("open_predictions") or []
+        if isinstance(prediction, dict)
+    ]
+    out["predictions"] = predictions
+    out["recent_predictions"] = recent_predictions
+    out["open_predictions"] = open_predictions
+    out.update(_trade_direction_metrics(predictions, "long"))
+    out.update(_trade_direction_metrics(predictions, "short"))
+    return out
+
+
+def _present_entry_decision_payload(payload: dict, selected_trade_side: str | None) -> dict:
+    out = deepcopy(payload)
+    out["horizons"] = {
+        key: _present_horizon_decision(value, selected_trade_side)
+        for key, value in (out.get("horizons") or {}).items()
+        if isinstance(value, dict)
+    }
+    out["top_reasons"] = [
+        _present_reason(reason, selected_trade_side)
+        for reason in out.get("top_reasons") or []
+        if isinstance(reason, dict)
+    ]
+    out["backtest_1y"] = {
+        key: _present_backtest_result(value)
+        for key, value in (out.get("backtest_1y") or {}).items()
+        if isinstance(value, dict)
+    }
+
+    thresholds = out.get("deployment_thresholds") if isinstance(out.get("deployment_thresholds"), dict) else {}
+    if selected_trade_side == "Upper":
+        out["deployment_thresholds"] = {
+            **thresholds,
+            "long": thresholds.get("continuation"),
+            "short": thresholds.get("reversal"),
+        }
+    elif selected_trade_side == "Lower":
+        out["deployment_thresholds"] = {
+            **thresholds,
+            "long": thresholds.get("reversal"),
+            "short": thresholds.get("continuation"),
+        }
+    return out
 
 
 def _attach_open_predictions_to_backtest(
@@ -522,7 +740,7 @@ def _build_payload_from_context(
     )
 
     context_meta = context_meta or build_entry_context_metadata(symbol, feature_df, backtest_1y)
-    return {
+    payload = {
         "symbol": symbol,
         "requested_as_of_date": _to_date_string(parsed_as_of_date),
         "as_of_date": _to_date_string(selected_row.get("date")),
@@ -548,6 +766,7 @@ def _build_payload_from_context(
             "quality": deepcopy(context_meta.get("quality", {})),
         },
     }
+    return _present_entry_decision_payload(payload, _training_side_for_row(selected_row))
 
 
 def get_entry_decision(symbol: str, as_of_date: str | None = None) -> dict:

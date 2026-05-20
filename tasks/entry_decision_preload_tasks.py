@@ -1074,6 +1074,36 @@ def _store_worker_results(
     return {"status": "ready", "loaded": 0, "symbols": []}
 
 
+def _sync_cached_entry_decisions_for_symbols(
+    symbols: Iterable[str],
+    as_of_date: str,
+    *,
+    source: str,
+) -> dict[str, dict]:
+    signal_sync: dict[str, dict] = {}
+    for symbol in _normalize_symbols(symbols):
+        payload = get_preloaded_entry_decision(symbol, as_of_date=as_of_date, full_only=True)
+        if payload is None:
+            continue
+        sync_result = safe_sync_entry_signals_from_payload(symbol, payload, source=source)
+        if sync_result.get("status") != "skipped":
+            signal_sync[symbol] = sync_result
+    return signal_sync
+
+
+def _ready_preload_result_with_cached_signal_sync(
+    symbols: list[str],
+    as_of_date: str,
+    *,
+    source: str,
+) -> dict:
+    result = {"status": "ready", "loaded": 0, "symbols": symbols}
+    signal_sync = _sync_cached_entry_decisions_for_symbols(symbols, as_of_date, source=source)
+    if signal_sync:
+        result["entry_signal_sync"] = signal_sync
+    return result
+
+
 def _reap_preload_worker(timeout_seconds: float) -> dict | None:
     process = _worker_process
     if process is None:
@@ -1375,7 +1405,7 @@ def _preload_entry_decisions_from_alert_payload_locked(
     as_of_date = _normalize_as_of_date(as_of_date)
     pending = _symbols_needing_preload(symbols, as_of_date=as_of_date, full_only=True)
     if not pending:
-        return {"status": "ready", "loaded": 0, "symbols": symbols}
+        return _ready_preload_result_with_cached_signal_sync(symbols, as_of_date, source=source)
 
     batch_size = _batch_size_for_pending(pending, max_symbols)
     if batch_size <= 0:
@@ -1462,7 +1492,7 @@ def preload_entry_decisions_from_alert_payload(
 
         if worker_result is not None:
             return worker_result
-        return {"status": "ready", "loaded": 0, "symbols": symbols}
+        return _ready_preload_result_with_cached_signal_sync(symbols, as_of_date, source="alert")
     finally:
         _preload_lock.release()
 

@@ -1,7 +1,10 @@
 # app.py
 import os
 import atexit
-from flask import Flask, request
+import re
+from urllib.parse import urlparse
+
+from flask import Flask, make_response, request
 from flask_cors import CORS
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -35,23 +38,102 @@ _REQUEST_ACTIVITY_EXCLUDED_PATHS = {
     "/api/alerts/stream",
 }
 
+_LOCAL_FRONTEND_ORIGINS = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+)
+
 
 def _should_track_request_activity() -> bool:
     if request.method == "OPTIONS":
         return False
     return request.path not in _REQUEST_ACTIVITY_EXCLUDED_PATHS
 
+
+def _split_cors_origins(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [origin.strip().rstrip("/") for origin in re.split(r"[\s,]+", value) if origin.strip()]
+
+
+def _cors_origins(testing: bool = False):
+    if testing:
+        return "*"
+
+    configured = _split_cors_origins(
+        os.getenv("front_end_client_website") or os.getenv("FRONT_END_CLIENT_WEBSITE")
+    )
+    if "*" in configured:
+        return "*"
+
+    origins = [*configured]
+    for origin in _LOCAL_FRONTEND_ORIGINS:
+        if origin not in origins:
+            origins.append(origin)
+    return origins
+
+
+def _is_private_network_host(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    host = hostname.lower()
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    if host.startswith("192.168.") or host.startswith("10."):
+        return True
+    match = re.fullmatch(r"172\.(\d{1,2})\..+", host)
+    return bool(match and 16 <= int(match.group(1)) <= 31)
+
+
+def _cors_origin_for_request(origin: str | None, allowed_origins) -> str | None:
+    if not origin:
+        return None
+    normalized = origin.rstrip("/")
+    if allowed_origins == "*" or "*" in allowed_origins:
+        return normalized
+    if normalized in allowed_origins:
+        return normalized
+
+    parsed = urlparse(normalized)
+    if parsed.scheme in {"http", "https"} and _is_private_network_host(parsed.hostname):
+        return normalized
+    return None
+
+
+def _apply_cors_headers(response, allowed_origins):
+    if not request.path.startswith("/api/"):
+        return response
+
+    allowed_origin = _cors_origin_for_request(request.headers.get("Origin"), allowed_origins)
+    if allowed_origin:
+        response.headers["Access-Control-Allow-Origin"] = allowed_origin
+        response.headers["Vary"] = "Origin"
+    response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Expose-Headers"] = "Retry-After"
+    response.headers["Access-Control-Max-Age"] = "600"
+    if request.headers.get("Access-Control-Request-Private-Network"):
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
+
+
 def create_app(testing=False):
     load_dotenv()
-    frontend_origin = "*" if testing else os.getenv("front_end_client_website")
 
     app = Flask(__name__)
     app.config["TESTING"] = testing
+    allowed_cors_origins = _cors_origins(testing)
 
     CORS(
         app,
-        resources={r"/api/*": {"origins": frontend_origin}},
+        resources={r"/api/*": {"origins": allowed_cors_origins}},
         allow_headers=["Content-Type", "Authorization"],
+        expose_headers=["Retry-After"],
+        methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     )
 
     app.register_blueprint(summary_blueprint)
@@ -63,6 +145,16 @@ def create_app(testing=False):
     app.register_blueprint(backtest_blueprint)
     app.register_blueprint(ticker_logo_blueprint)
     app.register_blueprint(world_markets_blueprint)
+
+    @app.before_request
+    def _handle_api_cors_preflight():
+        if request.method != "OPTIONS" or not request.path.startswith("/api/"):
+            return
+        return _apply_cors_headers(make_response(("", 204)), allowed_cors_origins)
+
+    @app.after_request
+    def _add_api_cors_headers(response):
+        return _apply_cors_headers(response, allowed_cors_origins)
 
     @app.before_request
     def _mark_request_started():

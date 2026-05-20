@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from .settings import *
-from .features import *
-from .model import *
+from copy import deepcopy
+import math
+import numpy as np
+import pandas as pd
+from . import features, model as model_utils, settings
 from .playbooks import _actual_direction_for_index
 
 def _adaptive_profile_key(profile: dict) -> tuple:
@@ -28,7 +30,7 @@ def _adaptive_profiles_for_horizon(horizon: int) -> list[dict]:
         opportunity_ids = ("trend_8x24", "trend_12x24", "same_side_trend_6x16", "broad_consensus_32x24")
 
     profiles: list[dict] = []
-    for profile in _ADAPTIVE_ANALOG_PROFILES:
+    for profile in settings._ADAPTIVE_ANALOG_PROFILES:
         if profile["id"] in core_ids:
             item = deepcopy(profile)
             item["tier"] = "core"
@@ -47,15 +49,15 @@ def _adaptive_profiles_for_horizon(horizon: int) -> list[dict]:
 def _adaptive_feature_columns(feature_df: pd.DataFrame) -> list[str]:
     return [
         feature
-        for feature in _MODEL_FEATURES
+        for feature in settings._MODEL_FEATURES
         if feature in feature_df.columns and feature != "event_risk_blocked"
     ]
 
 
 def _adaptive_state(feature_df: pd.DataFrame, horizon: int) -> dict:
     cache = feature_df.attrs.get("_adaptive_analog_state")
-    if not isinstance(cache, _NoDeepcopyDict):
-        cache = _NoDeepcopyDict(cache or {})
+    if not isinstance(cache, settings._NoDeepcopyDict):
+        cache = settings._NoDeepcopyDict(cache or {})
         feature_df.attrs["_adaptive_analog_state"] = cache
     if horizon in cache:
         return cache[horizon]
@@ -69,7 +71,7 @@ def _adaptive_state(feature_df: pd.DataFrame, horizon: int) -> dict:
 
     labels = np.full(len(feature_df), np.nan, dtype=float)
     for idx in range(len(feature_df)):
-        label = _label_for_index(feature_df, idx, horizon)
+        label = model_utils._label_for_index(feature_df, idx, horizon)
         if label is not None:
             labels[idx] = float(label)
 
@@ -116,7 +118,7 @@ def _adaptive_row_context(feature_df: pd.DataFrame, row_index: int, horizon: int
         return None
 
     train_idx = _adaptive_training_indices(state, row_index, horizon)
-    if len(train_idx) < _ADAPTIVE_MIN_TRAINING_ROWS:
+    if len(train_idx) < settings._ADAPTIVE_MIN_TRAINING_ROWS:
         state["row_context_cache"][row_index] = None
         return None
 
@@ -156,7 +158,7 @@ def _case_trade_return(
     outcome_close: float,
     atr: float,
 ) -> dict:
-    side_sign = _side_sign(touched_side)
+    side_sign = features._side_sign(touched_side)
     if predicted_direction == "continuation":
         trade_sign = side_sign
     elif predicted_direction == "reversal":
@@ -165,7 +167,7 @@ def _case_trade_return(
         trade_sign = 0.0
 
     if (
-        abs(trade_sign) <= _EPS
+        abs(trade_sign) <= settings._EPS
         or not np.isfinite(signal_close)
         or signal_close <= 0
         or not np.isfinite(outcome_close)
@@ -200,18 +202,18 @@ def _similar_case_payload(
     row = feature_df.iloc[int(idx)]
     outcome_row = feature_df.iloc[outcome_idx]
     raw_touched_side = row.get("touched_side")
-    touched_side = raw_touched_side if raw_touched_side in ("Upper", "Lower") else _training_side_for_row(row)
-    signal_close = _safe_num(row.get("close"), np.nan)
-    outcome_close = _safe_num(outcome_row.get("close"), np.nan)
-    atr = _safe_num(row.get("ATR14"), np.nan)
+    touched_side = raw_touched_side if raw_touched_side in ("Upper", "Lower") else model_utils._training_side_for_row(row)
+    signal_close = features._safe_num(row.get("close"), np.nan)
+    outcome_close = features._safe_num(outcome_row.get("close"), np.nan)
+    atr = features._safe_num(row.get("ATR14"), np.nan)
     actual_direction = (
-        _actual_direction(touched_side, signal_close, outcome_close, _flat_tolerance_for_row(row))
+        features._actual_direction(touched_side, signal_close, outcome_close, features._flat_tolerance_for_row(row))
         if touched_side in ("Upper", "Lower")
         else None
     )
     payload = {
-        "signal_date": _to_date_string(row.get("date")),
-        "outcome_date": _to_date_string(outcome_row.get("date")),
+        "signal_date": features._to_date_string(row.get("date")),
+        "outcome_date": features._to_date_string(outcome_row.get("date")),
         "horizon_days": int(horizon),
         "touched_side": touched_side,
         "was_band_touch": raw_touched_side in ("Upper", "Lower"),
@@ -219,7 +221,7 @@ def _similar_case_payload(
         "actual_direction": actual_direction,
         "signal_close": round(signal_close, 6) if np.isfinite(signal_close) else None,
         "outcome_close": round(outcome_close, 6) if np.isfinite(outcome_close) else None,
-        "is_correct": bool(_prediction_is_correct(predicted_direction, actual_direction)),
+        "is_correct": bool(features._prediction_is_correct(predicted_direction, actual_direction)),
         **_case_trade_return(touched_side, predicted_direction, signal_close, outcome_close, atr),
     }
     if distance is not None:
@@ -278,7 +280,7 @@ def _adaptive_raw_profile_prediction(
     age_scale = max(1, int(analog_idx.max()) - int(analog_idx.min()))
     recency = (neighbor_idx - int(analog_idx.min())) / age_scale
     weights = similarity * (1.0 + (0.80 * recency)) * (1.0 + (0.35 * state["touch_weight"][neighbor_idx]))
-    continuation_probability = _clamp(float(np.dot(weights, neighbor_labels) / (weights.sum() + _EPS)), 0.01, 0.99)
+    continuation_probability = features._clamp(float(np.dot(weights, neighbor_labels) / (weights.sum() + settings._EPS)), 0.01, 0.99)
     reversal_probability = 1.0 - continuation_probability
     if continuation_probability >= reversal_probability:
         direction = "continuation"
@@ -296,7 +298,7 @@ def _adaptive_raw_profile_prediction(
             {
                 "feature": feature_columns[int(feature_idx)],
                 "strength": round(float(feature_strength[int(feature_idx)]), 6),
-                "target_value": _value_for_payload(state["x"][row_index, int(feature_idx)]),
+                "target_value": features._value_for_payload(state["x"][row_index, int(feature_idx)]),
             }
             for feature_idx in selected_indices
         ),
@@ -339,19 +341,19 @@ def _adaptive_raw_profile_prediction(
 
 def _adaptive_reversal_veto_reason(row: pd.Series, horizon: int) -> str | None:
     side = row.get("touched_side")
-    side_ret_5d = _safe_num(row.get("side_ret_5d"), 0.0)
-    side_ret_10d = _safe_num(row.get("side_ret_10d"), 0.0)
-    side_qqq = _safe_num(row.get("side_qqq_ret_5d"), 0.0)
-    side_xlk = _safe_num(row.get("side_xlk_ret_5d"), 0.0)
-    pressure = _safe_num(row.get("side_weighted_volume_pressure_5"), 0.0)
-    adx = _safe_num(row.get("ADX14"), 0.0)
-    band_rank = _safe_num(row.get("band_width_percentile"), 0.5)
-    bandwidth_change = _safe_num(row.get("bandwidth_change_5d"), 0.0)
-    consecutive = _safe_num(row.get("consecutive_touch_count"), 0.0)
-    reentry = _safe_num(row.get("touch_reentry_signal"), 0.0)
-    wick_minus_body = _safe_num(row.get("touch_wick_minus_body"), 0.0)
-    close_location = _safe_num(row.get("side_close_location"), 0.0)
-    touch_depth = _safe_num(row.get("touch_depth_atr"), 0.0)
+    side_ret_5d = features._safe_num(row.get("side_ret_5d"), 0.0)
+    side_ret_10d = features._safe_num(row.get("side_ret_10d"), 0.0)
+    side_qqq = features._safe_num(row.get("side_qqq_ret_5d"), 0.0)
+    side_xlk = features._safe_num(row.get("side_xlk_ret_5d"), 0.0)
+    pressure = features._safe_num(row.get("side_weighted_volume_pressure_5"), 0.0)
+    adx = features._safe_num(row.get("ADX14"), 0.0)
+    band_rank = features._safe_num(row.get("band_width_percentile"), 0.5)
+    bandwidth_change = features._safe_num(row.get("bandwidth_change_5d"), 0.0)
+    consecutive = features._safe_num(row.get("consecutive_touch_count"), 0.0)
+    reentry = features._safe_num(row.get("touch_reentry_signal"), 0.0)
+    wick_minus_body = features._safe_num(row.get("touch_wick_minus_body"), 0.0)
+    close_location = features._safe_num(row.get("side_close_location"), 0.0)
+    touch_depth = features._safe_num(row.get("touch_depth_atr"), 0.0)
 
     if side == "Upper":
         broad_breakout = side_qqq > 0.035 and side_xlk > 0.035 and side_ret_5d > 0.045 and pressure > 0.10
@@ -384,19 +386,19 @@ def _adaptive_reversal_veto_reason(row: pd.Series, horizon: int) -> str | None:
 
 def _adaptive_continuation_veto_reason(row: pd.Series, horizon: int) -> str | None:
     side = row.get("touched_side")
-    side_ret_5d = _safe_num(row.get("side_ret_5d"), 0.0)
-    side_ret_10d = _safe_num(row.get("side_ret_10d"), 0.0)
-    side_ret_20d = _safe_num(row.get("side_ret_20d"), 0.0)
-    side_rsi = _safe_num(row.get("side_rsi_deviation"), 0.0)
-    side_qqq = _safe_num(row.get("side_qqq_ret_5d"), 0.0)
-    pressure = _safe_num(row.get("side_weighted_volume_pressure_5"), 0.0)
-    rel_volume = _safe_num(row.get("rel_volume_20"), 1.0)
-    band_rank = _safe_num(row.get("band_width_percentile"), 0.5)
-    bandwidth_change = _safe_num(row.get("bandwidth_change_5d"), 0.0)
-    consecutive = _safe_num(row.get("consecutive_touch_count"), 0.0)
-    reentry = _safe_num(row.get("touch_reentry_signal"), 0.0)
-    wick_minus_body = _safe_num(row.get("touch_wick_minus_body"), 0.0)
-    close_location = _safe_num(row.get("side_close_location"), 0.0)
+    side_ret_5d = features._safe_num(row.get("side_ret_5d"), 0.0)
+    side_ret_10d = features._safe_num(row.get("side_ret_10d"), 0.0)
+    side_ret_20d = features._safe_num(row.get("side_ret_20d"), 0.0)
+    side_rsi = features._safe_num(row.get("side_rsi_deviation"), 0.0)
+    side_qqq = features._safe_num(row.get("side_qqq_ret_5d"), 0.0)
+    pressure = features._safe_num(row.get("side_weighted_volume_pressure_5"), 0.0)
+    rel_volume = features._safe_num(row.get("rel_volume_20"), 1.0)
+    band_rank = features._safe_num(row.get("band_width_percentile"), 0.5)
+    bandwidth_change = features._safe_num(row.get("bandwidth_change_5d"), 0.0)
+    consecutive = features._safe_num(row.get("consecutive_touch_count"), 0.0)
+    reentry = features._safe_num(row.get("touch_reentry_signal"), 0.0)
+    wick_minus_body = features._safe_num(row.get("touch_wick_minus_body"), 0.0)
+    close_location = features._safe_num(row.get("side_close_location"), 0.0)
 
     rejection_close = reentry > 0.0 and wick_minus_body >= 0.28 and close_location <= 0.25
     if rejection_close:
@@ -425,11 +427,11 @@ def _adaptive_continuation_veto_reason(row: pd.Series, horizon: int) -> str | No
 
 def _adaptive_profile_thresholds(profile: dict, direction: str) -> tuple[float, float, float]:
     min_precision = (
-        _ADAPTIVE_REVERSAL_PRECISION_THRESHOLD
+        settings._ADAPTIVE_REVERSAL_PRECISION_THRESHOLD
         if direction == "reversal"
-        else _ADAPTIVE_CONTINUATION_PRECISION_THRESHOLD
+        else settings._ADAPTIVE_CONTINUATION_PRECISION_THRESHOLD
     )
-    min_wilson = _ADAPTIVE_MIN_WILSON
+    min_wilson = settings._ADAPTIVE_MIN_WILSON
     min_confidence = float(
         profile["reversal_confidence"] if direction == "reversal" else profile["continuation_confidence"]
     )
@@ -437,19 +439,19 @@ def _adaptive_profile_thresholds(profile: dict, direction: str) -> tuple[float, 
 
     if tier == "expansion":
         if direction == "reversal":
-            min_precision = max(min_precision, _ADAPTIVE_EXPANSION_REVERSAL_MIN_PRECISION)
-            min_wilson = max(min_wilson, _ADAPTIVE_EXPANSION_REVERSAL_MIN_WILSON)
-            min_confidence = max(min_confidence, _ADAPTIVE_EXPANSION_REVERSAL_MIN_CONFIDENCE)
+            min_precision = max(min_precision, settings._ADAPTIVE_EXPANSION_REVERSAL_MIN_PRECISION)
+            min_wilson = max(min_wilson, settings._ADAPTIVE_EXPANSION_REVERSAL_MIN_WILSON)
+            min_confidence = max(min_confidence, settings._ADAPTIVE_EXPANSION_REVERSAL_MIN_CONFIDENCE)
         else:
-            min_precision = max(min_precision, _ADAPTIVE_EXPANSION_CONTINUATION_MIN_PRECISION)
-            min_wilson = min(min_wilson, _ADAPTIVE_EXPANSION_CONTINUATION_MIN_WILSON)
-            min_confidence = max(min_confidence, _ADAPTIVE_EXPANSION_CONTINUATION_MIN_CONFIDENCE)
+            min_precision = max(min_precision, settings._ADAPTIVE_EXPANSION_CONTINUATION_MIN_PRECISION)
+            min_wilson = min(min_wilson, settings._ADAPTIVE_EXPANSION_CONTINUATION_MIN_WILSON)
+            min_confidence = max(min_confidence, settings._ADAPTIVE_EXPANSION_CONTINUATION_MIN_CONFIDENCE)
     elif tier == "opportunity":
         if direction != "continuation":
             return 1.01, 1.01, 1.01
-        min_precision = max(min_precision, _ADAPTIVE_OPPORTUNITY_CONTINUATION_MIN_PRECISION)
-        min_wilson = min(min_wilson, _ADAPTIVE_OPPORTUNITY_CONTINUATION_MIN_WILSON)
-        min_confidence = max(min_confidence, _ADAPTIVE_OPPORTUNITY_CONTINUATION_MIN_CONFIDENCE)
+        min_precision = max(min_precision, settings._ADAPTIVE_OPPORTUNITY_CONTINUATION_MIN_PRECISION)
+        min_wilson = min(min_wilson, settings._ADAPTIVE_OPPORTUNITY_CONTINUATION_MIN_WILSON)
+        min_confidence = max(min_confidence, settings._ADAPTIVE_OPPORTUNITY_CONTINUATION_MIN_CONFIDENCE)
 
     return min_precision, min_wilson, min_confidence
 
@@ -468,21 +470,21 @@ def _empirical_bucket(value: float, cuts: tuple[float, float, float, float]) -> 
 
 def _empirical_regime_attrs(row: pd.Series, horizon: int) -> dict[str, str]:
     side = row.get("touched_side")
-    reentry = _safe_num(row.get("touch_reentry_signal"), 0.0)
-    wick_minus_body = _safe_num(row.get("touch_wick_minus_body"), 0.0)
-    close_location = _safe_num(row.get("side_close_location"), 0.0)
-    consecutive = _safe_num(row.get("consecutive_touch_count"), 0.0)
-    side_ret_5d = _safe_num(row.get("side_ret_5d"), 0.0)
-    side_ret_10d = _safe_num(row.get("side_ret_10d"), 0.0)
-    side_ret_20d = _safe_num(row.get("side_ret_20d"), 0.0)
-    side_qqq = _safe_num(row.get("side_qqq_ret_5d"), 0.0)
-    side_xlk = _safe_num(row.get("side_xlk_ret_5d"), 0.0)
-    pressure = _safe_num(row.get("side_weighted_volume_pressure_5"), 0.0)
-    rel_volume = _safe_num(row.get("rel_volume_20"), 1.0)
-    band_rank = _safe_num(row.get("band_width_percentile"), 0.5)
-    bandwidth_change = _safe_num(row.get("bandwidth_change_5d"), 0.0)
-    touch_depth = _safe_num(row.get("touch_depth_atr"), 0.0)
-    adx = _safe_num(row.get("ADX14"), 0.0)
+    reentry = features._safe_num(row.get("touch_reentry_signal"), 0.0)
+    wick_minus_body = features._safe_num(row.get("touch_wick_minus_body"), 0.0)
+    close_location = features._safe_num(row.get("side_close_location"), 0.0)
+    consecutive = features._safe_num(row.get("consecutive_touch_count"), 0.0)
+    side_ret_5d = features._safe_num(row.get("side_ret_5d"), 0.0)
+    side_ret_10d = features._safe_num(row.get("side_ret_10d"), 0.0)
+    side_ret_20d = features._safe_num(row.get("side_ret_20d"), 0.0)
+    side_qqq = features._safe_num(row.get("side_qqq_ret_5d"), 0.0)
+    side_xlk = features._safe_num(row.get("side_xlk_ret_5d"), 0.0)
+    pressure = features._safe_num(row.get("side_weighted_volume_pressure_5"), 0.0)
+    rel_volume = features._safe_num(row.get("rel_volume_20"), 1.0)
+    band_rank = features._safe_num(row.get("band_width_percentile"), 0.5)
+    bandwidth_change = features._safe_num(row.get("bandwidth_change_5d"), 0.0)
+    touch_depth = features._safe_num(row.get("touch_depth_atr"), 0.0)
+    adx = features._safe_num(row.get("ADX14"), 0.0)
 
     if reentry > 0.0 and (wick_minus_body >= 0.10 or close_location <= 0.30):
         touch_quality = "rejection"
@@ -575,7 +577,7 @@ def _empirical_rows_for_scope(
     matches: list[dict] = []
     for idx in range(max_idx + 1):
         row = feature_df.iloc[idx]
-        if _safe_bool(row.get("event_risk_blocked")):
+        if features._safe_bool(row.get("event_risk_blocked")):
             continue
         if row.get("touched_side") not in ("Upper", "Lower"):
             continue
@@ -586,13 +588,13 @@ def _empirical_rows_for_scope(
         if actual not in ("continuation", "reversal"):
             continue
         outcome_row = feature_df.iloc[idx + horizon]
-        signal_close = _safe_num(row.get("close"), np.nan)
-        outcome_close = _safe_num(outcome_row.get("close"), np.nan)
+        signal_close = features._safe_num(row.get("close"), np.nan)
+        outcome_close = features._safe_num(outcome_row.get("close"), np.nan)
         matches.append(
             {
                 "idx": idx,
-                "signal_date": _to_date_string(row.get("date")),
-                "outcome_date": _to_date_string(outcome_row.get("date")),
+                "signal_date": features._to_date_string(row.get("date")),
+                "outcome_date": features._to_date_string(outcome_row.get("date")),
                 "direction": actual,
                 "actual_direction": actual,
                 "touched_side": row.get("touched_side"),
@@ -601,12 +603,12 @@ def _empirical_rows_for_scope(
                 "horizon_days": int(horizon),
             }
         )
-    return matches[-_EMPIRICAL_REGIME_MAX_MATCHES:]
+    return matches[-settings._EMPIRICAL_REGIME_MAX_MATCHES:]
 
 
 def _empirical_case_for_direction(row: dict, direction: str) -> dict:
-    signal_close = _safe_num(row.get("signal_close"), np.nan)
-    outcome_close = _safe_num(row.get("outcome_close"), np.nan)
+    signal_close = features._safe_num(row.get("signal_close"), np.nan)
+    outcome_close = features._safe_num(row.get("outcome_close"), np.nan)
     return {
         "signal_date": row.get("signal_date") or row.get("date"),
         "outcome_date": row.get("outcome_date"),
@@ -616,7 +618,7 @@ def _empirical_case_for_direction(row: dict, direction: str) -> dict:
         "actual_direction": row.get("actual_direction") or row.get("direction"),
         "signal_close": row.get("signal_close"),
         "outcome_close": row.get("outcome_close"),
-        "is_correct": bool(_prediction_is_correct(direction, row.get("actual_direction") or row.get("direction"))),
+        "is_correct": bool(features._prediction_is_correct(direction, row.get("actual_direction") or row.get("direction"))),
         **_case_trade_return(
             row.get("touched_side"),
             direction,
@@ -641,25 +643,25 @@ def _score_empirical_regime_direction(
     correct = sum(1 for row in rows if row.get("direction") == direction)
     precision = correct / count
     posterior = (correct + 1.0) / (count + 2.0)
-    wilson = _wilson_lower_bound(correct, count)
-    recent_rows = rows[-min(_EMPIRICAL_REGIME_RECENT_MATCHES, count) :]
+    wilson = model_utils._wilson_lower_bound(correct, count)
+    recent_rows = rows[-min(settings._EMPIRICAL_REGIME_RECENT_MATCHES, count) :]
     recent_correct = sum(1 for row in recent_rows if row.get("direction") == direction)
     recent_precision = recent_correct / len(recent_rows) if recent_rows else precision
 
     if direction == "reversal":
-        min_precision = _EMPIRICAL_REVERSAL_MIN_PRECISION
-        min_wilson = _EMPIRICAL_REVERSAL_MIN_WILSON
+        min_precision = settings._EMPIRICAL_REVERSAL_MIN_PRECISION
+        min_wilson = settings._EMPIRICAL_REVERSAL_MIN_WILSON
         min_recent = 0.78
     else:
-        min_precision = _EMPIRICAL_CONTINUATION_MIN_PRECISION
-        min_wilson = _EMPIRICAL_CONTINUATION_MIN_WILSON
+        min_precision = settings._EMPIRICAL_CONTINUATION_MIN_PRECISION
+        min_wilson = settings._EMPIRICAL_CONTINUATION_MIN_WILSON
         min_recent = 0.72
 
     if precision < min_precision or wilson < min_wilson or recent_precision < min_recent:
         return None
 
     specificity = min(1.0, len(fields) / 4.0)
-    sample_strength = min(1.0, math.log1p(count) / math.log1p(_EMPIRICAL_REGIME_MAX_MATCHES))
+    sample_strength = min(1.0, math.log1p(count) / math.log1p(settings._EMPIRICAL_REGIME_MAX_MATCHES))
     score = (
         (0.42 * precision)
         + (0.24 * wilson)
@@ -697,23 +699,23 @@ def _score_recent_empirical_regime_direction(
 
     out: list[dict] = []
     min_precision = (
-        _EMPIRICAL_RECENT_REVERSAL_MIN_PRECISION
+        settings._EMPIRICAL_RECENT_REVERSAL_MIN_PRECISION
         if direction == "reversal"
-        else _EMPIRICAL_RECENT_CONTINUATION_MIN_PRECISION
+        else settings._EMPIRICAL_RECENT_CONTINUATION_MIN_PRECISION
     )
     min_wilson = (
-        _EMPIRICAL_RECENT_REVERSAL_MIN_WILSON
+        settings._EMPIRICAL_RECENT_REVERSAL_MIN_WILSON
         if direction == "reversal"
-        else _EMPIRICAL_RECENT_CONTINUATION_MIN_WILSON
+        else settings._EMPIRICAL_RECENT_CONTINUATION_MIN_WILSON
     )
 
-    for window in _EMPIRICAL_RECENT_WINDOWS:
+    for window in settings._EMPIRICAL_RECENT_WINDOWS:
         if len(rows) < window:
             continue
         recent_rows = rows[-window:]
         correct = sum(1 for row in recent_rows if row.get("direction") == direction)
         precision = correct / window
-        wilson = _wilson_lower_bound(correct, window)
+        wilson = model_utils._wilson_lower_bound(correct, window)
         if precision < min_precision or wilson < min_wilson:
             continue
         posterior = (correct + 1.0) / (window + 2.0)
@@ -773,8 +775,8 @@ def _score_empirical_regime(feature_df: pd.DataFrame, row_index: int, horizon: i
             horizon=horizon,
             fields=fields,
         )
-        reverse_min_matches = max(min_matches, _EMPIRICAL_REVERSAL_MIN_MATCHES)
-        continue_min_matches = max(min_matches, _EMPIRICAL_CONTINUATION_MIN_MATCHES)
+        reverse_min_matches = max(min_matches, settings._EMPIRICAL_REVERSAL_MIN_MATCHES)
+        continue_min_matches = max(min_matches, settings._EMPIRICAL_CONTINUATION_MIN_MATCHES)
         for direction, required_matches in (
             ("reversal", reverse_min_matches),
             ("continuation", continue_min_matches),
@@ -826,7 +828,7 @@ def _empirical_regime_horizon(
     candidate_count: int,
 ) -> dict:
     direction = signal["direction"]
-    posterior = _clamp(_safe_num(signal.get("posterior_probability"), 0.5), 0.01, 0.99)
+    posterior = features._clamp(features._safe_num(signal.get("posterior_probability"), 0.5), 0.01, 0.99)
     if direction == "continuation":
         continuation_probability = posterior
         reversal_probability = 1.0 - posterior
@@ -835,7 +837,7 @@ def _empirical_regime_horizon(
         continuation_probability = 1.0 - posterior
 
     confidence_score = int(round(max(continuation_probability, reversal_probability) * 100))
-    model = _model_metadata(
+    model = model_utils._model_metadata(
         training_count,
         continuation_count,
         reversal_count,
@@ -872,17 +874,17 @@ def _empirical_regime_horizon(
         "continuation_validation_count": signal["match_count"] if direction == "continuation" else 0,
         "reversal_validation_count": signal["match_count"] if direction == "reversal" else 0,
         "validation_policy": {
-            "empirical_reversal_min_precision": _EMPIRICAL_REVERSAL_MIN_PRECISION,
-            "empirical_continuation_min_precision": _EMPIRICAL_CONTINUATION_MIN_PRECISION,
-            "empirical_reversal_min_wilson": _EMPIRICAL_REVERSAL_MIN_WILSON,
-            "empirical_continuation_min_wilson": _EMPIRICAL_CONTINUATION_MIN_WILSON,
-            "empirical_recent_reversal_min_precision": _EMPIRICAL_RECENT_REVERSAL_MIN_PRECISION,
-            "empirical_recent_continuation_min_precision": _EMPIRICAL_RECENT_CONTINUATION_MIN_PRECISION,
+            "empirical_reversal_min_precision": settings._EMPIRICAL_REVERSAL_MIN_PRECISION,
+            "empirical_continuation_min_precision": settings._EMPIRICAL_CONTINUATION_MIN_PRECISION,
+            "empirical_reversal_min_wilson": settings._EMPIRICAL_REVERSAL_MIN_WILSON,
+            "empirical_continuation_min_wilson": settings._EMPIRICAL_CONTINUATION_MIN_WILSON,
+            "empirical_recent_reversal_min_precision": settings._EMPIRICAL_RECENT_REVERSAL_MIN_PRECISION,
+            "empirical_recent_continuation_min_precision": settings._EMPIRICAL_RECENT_CONTINUATION_MIN_PRECISION,
             "scope": signal["scope"],
             "fields": signal["fields"],
         },
         "confidence_score": confidence_score,
-        "threshold": _PREDICTION_THRESHOLD,
+        "threshold": settings._PREDICTION_THRESHOLD,
         "no_prediction_reason": None,
         "reversal_veto_reason": None,
         "analog_evidence": {
@@ -924,20 +926,20 @@ def _empirical_regime_horizon(
 
 
 def _adaptive_validation_indices(feature_df: pd.DataFrame, row_index: int, horizon: int) -> list[int]:
-    start = max(0, row_index - _ADAPTIVE_VALIDATION_LOOKBACK_ROWS)
+    start = max(0, row_index - settings._ADAPTIVE_VALIDATION_LOOKBACK_ROWS)
     indices: list[int] = []
     for idx in range(start, row_index):
         row = feature_df.iloc[idx]
         if row.get("touched_side") not in ("Upper", "Lower"):
             continue
-        if _safe_bool(row.get("event_risk_blocked")):
+        if features._safe_bool(row.get("event_risk_blocked")):
             continue
         if idx + horizon > row_index:
             continue
         if _actual_direction_for_index(feature_df, idx, horizon) not in ("continuation", "reversal"):
             continue
         indices.append(idx)
-    return indices[-_ADAPTIVE_MAX_VALIDATION_TOUCHES:]
+    return indices[-settings._ADAPTIVE_MAX_VALIDATION_TOUCHES:]
 
 
 def _score_adaptive_profile(
@@ -983,7 +985,7 @@ def _score_adaptive_profile(
     validation_count = int(raw["neighbor_count"])
     correct_count = int(round(raw["analog_agreement"] * validation_count))
     precision = raw["analog_agreement"]
-    wilson = _wilson_lower_bound(correct_count, validation_count) if validation_count else 0.0
+    wilson = model_utils._wilson_lower_bound(correct_count, validation_count) if validation_count else 0.0
     min_precision, min_wilson, min_confidence = _adaptive_profile_thresholds(profile, direction)
     passed = (
         validation_count > 0
@@ -1028,8 +1030,8 @@ def _evaluate_horizon_with_adaptive_analogs(feature_df: pd.DataFrame, row_index:
     profile_count = len(_adaptive_profiles_for_horizon(horizon))
     regime_count = len(_empirical_regime_specs(horizon))
     candidate_search_count = profile_count + regime_count
-    if training_count < _ADAPTIVE_MIN_TRAINING_ROWS:
-        result = _no_prediction_horizon(
+    if training_count < settings._ADAPTIVE_MIN_TRAINING_ROWS:
+        result = model_utils._no_prediction_horizon(
             horizon,
             "insufficient_training_data",
             training_sample_count=training_count,
@@ -1070,7 +1072,7 @@ def _evaluate_horizon_with_adaptive_analogs(feature_df: pd.DataFrame, row_index:
         elif not raw_hits:
             reason = "low_adaptive_confidence"
 
-        result = _no_prediction_horizon(
+        result = model_utils._no_prediction_horizon(
             horizon,
             reason,
             training_sample_count=training_count,
@@ -1085,10 +1087,10 @@ def _evaluate_horizon_with_adaptive_analogs(feature_df: pd.DataFrame, row_index:
                 "status": item["status"],
                 "direction": item.get("direction") or item.get("raw", {}).get("direction"),
                 "tier": item.get("tier") or item["profile"].get("tier"),
-                "precision": _value_for_payload(item.get("precision")),
+                "precision": features._value_for_payload(item.get("precision")),
                 "validation_count": item.get("validation_count", 0),
                 "blocked_reason": item.get("blocked_reason"),
-                "confidence": _value_for_payload(item.get("raw", {}).get("confidence")),
+                "confidence": features._value_for_payload(item.get("raw", {}).get("confidence")),
             }
             for item in sorted(scored, key=lambda candidate: candidate.get("score", 0.0), reverse=True)[:5]
         ]
@@ -1105,7 +1107,7 @@ def _evaluate_horizon_with_adaptive_analogs(feature_df: pd.DataFrame, row_index:
     reversal_probability = raw["reversal_probability"]
     confidence_score = int(round(max(continuation_probability, reversal_probability) * 100))
     precision = best["precision"] or 0.0
-    model = _model_metadata(
+    model = model_utils._model_metadata(
         training_count,
         continuation_count,
         reversal_count,
@@ -1144,13 +1146,13 @@ def _evaluate_horizon_with_adaptive_analogs(feature_df: pd.DataFrame, row_index:
         "continuation_validation_count": best["validation_count"] if direction == "continuation" else 0,
         "reversal_validation_count": best["validation_count"] if direction == "reversal" else 0,
         "validation_policy": {
-            "min_reversal_precision": _ADAPTIVE_REVERSAL_PRECISION_THRESHOLD,
-            "min_continuation_precision": _ADAPTIVE_CONTINUATION_PRECISION_THRESHOLD,
-            "min_wilson_lower_bound": _ADAPTIVE_MIN_WILSON,
-            "expansion_reversal_min_precision": _ADAPTIVE_EXPANSION_REVERSAL_MIN_PRECISION,
-            "expansion_continuation_min_precision": _ADAPTIVE_EXPANSION_CONTINUATION_MIN_PRECISION,
-            "opportunity_continuation_min_precision": _ADAPTIVE_OPPORTUNITY_CONTINUATION_MIN_PRECISION,
-            "validation_lookback_rows": _ADAPTIVE_VALIDATION_LOOKBACK_ROWS,
+            "min_reversal_precision": settings._ADAPTIVE_REVERSAL_PRECISION_THRESHOLD,
+            "min_continuation_precision": settings._ADAPTIVE_CONTINUATION_PRECISION_THRESHOLD,
+            "min_wilson_lower_bound": settings._ADAPTIVE_MIN_WILSON,
+            "expansion_reversal_min_precision": settings._ADAPTIVE_EXPANSION_REVERSAL_MIN_PRECISION,
+            "expansion_continuation_min_precision": settings._ADAPTIVE_EXPANSION_CONTINUATION_MIN_PRECISION,
+            "opportunity_continuation_min_precision": settings._ADAPTIVE_OPPORTUNITY_CONTINUATION_MIN_PRECISION,
+            "validation_lookback_rows": settings._ADAPTIVE_VALIDATION_LOOKBACK_ROWS,
         },
         "confidence_score": confidence_score,
         "threshold": raw["required_confidence"],
@@ -1175,9 +1177,9 @@ def _evaluate_horizon_with_adaptive_analogs(feature_df: pd.DataFrame, row_index:
                 "status": item["status"],
                 "direction": item.get("direction") or item.get("raw", {}).get("direction"),
                 "tier": item.get("tier") or item["profile"].get("tier"),
-                "precision": _value_for_payload(item.get("precision")),
+                "precision": features._value_for_payload(item.get("precision")),
                 "validation_count": item.get("validation_count", 0),
-                "confidence": _value_for_payload(item.get("raw", {}).get("confidence")),
+                "confidence": features._value_for_payload(item.get("raw", {}).get("confidence")),
                 "blocked_reason": item.get("blocked_reason"),
             }
             for item in sorted(scored, key=lambda candidate: candidate.get("score", 0.0), reverse=True)[:5]
@@ -1194,8 +1196,5 @@ def _evaluate_horizon_with_adaptive_analogs(feature_df: pd.DataFrame, row_index:
         ],
         "model": model,
     }
-
-
-
 
 __all__ = [name for name in globals() if not name.startswith("__")]

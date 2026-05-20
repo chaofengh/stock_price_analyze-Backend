@@ -1271,9 +1271,9 @@ def test_historical_as_of_uses_cached_context_without_point_in_time_rebuild(monk
     assert payload["as_of_date"] == "2026-05-06"
     assert payload["chart_data"][-1]["date"] == "2026-05-06"
     assert payload["horizons"]["10d"]["status"] == "prediction"
-    assert payload["horizons"]["10d"]["predicted_direction"] == "reversal"
+    assert payload["horizons"]["10d"]["predicted_direction"] == "short"
     assert payload["backtest_1y"]["10d"]["open_predictions"][0]["signal_date"] == "2026-05-06"
-    assert payload["backtest_1y"]["10d"]["open_predictions"][0]["predicted_direction"] == "reversal"
+    assert payload["backtest_1y"]["10d"]["open_predictions"][0]["predicted_direction"] == "short"
 
 
 def test_latest_payload_keeps_prior_open_prediction_marker(monkeypatch):
@@ -1312,7 +1312,7 @@ def test_latest_payload_keeps_prior_open_prediction_marker(monkeypatch):
     assert open_predictions[0]["signal_date"] == "2026-05-06"
     assert open_predictions[0]["current_date"] == "2026-05-07"
     assert open_predictions[0]["status"] == "open"
-    assert open_predictions[0]["predicted_direction"] == "reversal"
+    assert open_predictions[0]["predicted_direction"] == "short"
     assert open_predictions[0]["elapsed_sessions"] == 1
     assert open_predictions[0]["remaining_sessions"] == 9
     assert open_predictions[0]["current_close"] == 102.5
