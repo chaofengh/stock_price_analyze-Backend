@@ -1,5 +1,6 @@
 from datetime import datetime
 import logging
+from pathlib import Path
 import sys
 
 import numpy as np
@@ -8,21 +9,30 @@ import pytest
 import pytz
 
 import analysis.trade_entry_evaluation as tee
+import analysis.trade_entry_evaluation.payload as tee_payload
 from analysis.indicators import compute_bollinger_bands
 from analysis.trade_entry_evaluation import (
     _MODEL_FEATURES,
     _apply_deployment_quality_gates_to_decision,
+    _apply_direction_quality_gates_to_decision,
+    _adaptive_state,
+    _adaptive_training_indices,
     _build_training_matrix,
     _coverage_repair_candidates,
     _coverage_repair_horizon,
     _deployment_quality_gate,
+    _ensure_decision_for_index,
     _finalize_deployment_quality,
     _prepare_feature_frame,
     _prediction_book_metrics,
     _prediction_book_preserves_accuracy,
+    _prediction_evidence_candidates,
+    _prior_completed_predictions,
     _quiet_yfinance_earnings_lookup,
     _reversal_veto_reason,
     _select_max_safe_coverage_candidates,
+    _empirical_regime_attrs,
+    _empirical_rows_for_scope,
     build_entry_decision_from_context,
     build_entry_decision_context_from_frame,
     build_entry_decision_from_frame,
@@ -179,14 +189,16 @@ def _coverage_gate_frame(actual_by_index: dict[int, str]) -> pd.DataFrame:
     return df
 
 
-def test_latest_no_touch_still_runs_model_for_today_exception():
+def test_latest_no_touch_returns_no_prediction_for_both_horizons():
     df = _force_no_touch(_base_frame())
     payload = build_entry_decision_from_frame("TEST", df, earnings_dates=set())
 
     assert payload["touched_side"] is None
     assert payload["setup_type"] == "no_band_setup"
-    assert payload["horizons"]["5d"]["no_prediction_reason"] != "no_bollinger_touch"
-    assert payload["horizons"]["10d"]["no_prediction_reason"] != "no_bollinger_touch"
+    assert payload["horizons"]["5d"]["status"] == "no_prediction"
+    assert payload["horizons"]["5d"]["no_prediction_reason"] == "no_bollinger_touch"
+    assert payload["horizons"]["10d"]["status"] == "no_prediction"
+    assert payload["horizons"]["10d"]["no_prediction_reason"] == "no_bollinger_touch"
 
 
 def test_historical_no_touch_returns_no_prediction_for_both_horizons():
@@ -345,18 +357,103 @@ def test_adaptive_model_reports_low_history_instead_of_forcing_prediction():
     assert horizon["no_prediction_reason"] == "insufficient_training_data"
 
 
-def test_training_matrix_uses_non_touch_rows_when_outcomes_are_known():
+def test_training_matrix_uses_only_touch_rows_when_outcomes_are_known():
     df = _empty_supervised_frame(30)
     df["close"] = np.linspace(100.0, 129.0, 30)
     df["analysis_side_sign"] = 1.0
+    df.loc[[0, 2, 4, 6], "touched_side"] = "Upper"
+    df.loc[[0, 2, 4, 6], "touch_side_sign"] = 1.0
 
     x_train, y_train, indices = _build_training_matrix(df, target_idx=20, horizon=5)
 
-    assert len(x_train) == 16
-    assert len(y_train) == 16
-    assert indices.tolist() == list(range(16))
-    assert df.loc[indices, "touched_side"].isna().all()
+    assert len(x_train) == 4
+    assert len(y_train) == 4
+    assert indices.tolist() == [0, 2, 4, 6]
+    assert df.loc[indices, "touched_side"].eq("Upper").all()
     assert set(y_train.tolist()) == {1.0}
+
+
+def test_training_matrix_excludes_rows_whose_outcome_is_after_target_date():
+    df = _empty_supervised_frame(25)
+    for idx, continuation in ((0, True), (5, False), (6, True), (10, True)):
+        _set_training_signal(df, idx, continuation=continuation, feature_value=float(idx))
+
+    _x_train, y_train, indices = _build_training_matrix(df, target_idx=10, horizon=5)
+
+    assert indices.tolist() == [0, 5]
+    assert y_train.tolist() == [1.0, 0.0]
+
+
+def test_adaptive_state_labels_do_not_leak_into_training_indices():
+    df = _empty_supervised_frame(25)
+    for idx, continuation in ((0, True), (5, False), (6, True), (10, True)):
+        _set_training_signal(df, idx, continuation=continuation, feature_value=float(idx))
+
+    state = _adaptive_state(df, horizon=5)
+    train_idx = _adaptive_training_indices(state, target_idx=10, horizon=5)
+
+    assert np.isfinite(state["labels"][6])
+    assert train_idx.tolist() == [0, 5]
+    assert all(idx + 5 <= 10 for idx in train_idx)
+
+
+def test_empirical_regime_rows_exclude_current_and_future_outcomes():
+    df = _empty_supervised_frame(30)
+    for idx, continuation in ((0, True), (5, False), (6, True), (12, True)):
+        _set_training_signal(df, idx, continuation=continuation, feature_value=0.0)
+    df.loc[10, "touched_side"] = "Upper"
+    df.loc[10, "touch_side_sign"] = 1.0
+
+    target_attrs = _empirical_regime_attrs(df.iloc[10], horizon=5)
+    rows = _empirical_rows_for_scope(
+        df,
+        target_attrs,
+        row_index=10,
+        horizon=5,
+        fields=("side",),
+    )
+
+    assert [row["idx"] for row in rows] == [0, 5]
+    target_date = pd.Timestamp(df.loc[10, "date"])
+    assert all(pd.Timestamp(row["outcome_date"]) <= target_date for row in rows)
+
+
+def test_deployment_evidence_uses_only_prior_completed_outcomes():
+    prediction = {
+        "signal_date": "2026-01-10",
+        "outcome_date": "2026-01-17",
+        "horizon_days": 5,
+        "touched_side": "Upper",
+        "predicted_direction": "continuation",
+        "actual_direction": "continuation",
+        "is_correct": True,
+        "confidence_score": 90,
+        "signal_model_id": "same_signal",
+        "signal_tier": "regime",
+    }
+    candidate = _prediction_evidence_candidates(prediction)[0]
+    prior_rows = [
+        {**prediction, "signal_date": "2025-12-30", "outcome_date": "2026-01-09"},
+        {**prediction, "signal_date": "2026-01-03", "outcome_date": "2026-01-10"},
+        {**prediction, "signal_date": "2026-01-04", "outcome_date": "2026-01-12"},
+        {
+            **prediction,
+            "signal_date": "2025-12-30",
+            "outcome_date": "2026-01-09",
+            "signal_model_id": "different_signal",
+        },
+    ]
+
+    rows = _prior_completed_predictions(
+        prior_rows,
+        scope=candidate["scope"],
+        key=candidate["key"],
+        signal_date=pd.Timestamp(prediction["signal_date"]),
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["outcome_date"] == "2026-01-09"
+    assert rows[0]["signal_model_id"] == "same_signal"
 
 
 def test_similar_case_payload_uses_training_side_for_non_touch_analog_rows():
@@ -584,23 +681,27 @@ def test_backtest_adds_expected_value_and_confidence_bucket_scoring():
     backtest = run_decision_backtest(df, decisions_by_index=decisions)
     five_day = backtest["5d"]
 
-    assert five_day["accuracy"] == 0.8
+    assert five_day["accuracy"] == 0.6
     assert five_day["win_rate"] == pytest.approx(0.8)
     assert five_day["expected_return"] == pytest.approx(0.046)
     assert five_day["expected_downside"] == pytest.approx(-0.04)
     assert five_day["expected_atr_return"] == pytest.approx(0.46)
     assert five_day["atr_reward_risk"] == pytest.approx(1.6875)
+    assert five_day["flat_count"] == 2
 
     by_date = {item["signal_date"]: item for item in five_day["predictions"]}
     assert by_date["2025-01-08"]["is_correct"] is False
+    assert by_date["2025-01-08"]["actual_direction"] == "flat"
     assert by_date["2025-01-08"]["trade_direction"] == "short"
     assert by_date["2025-01-08"]["trade_return"] == pytest.approx(-0.04)
 
     buckets = {item["bucket"]: item for item in five_day["confidence_buckets"]}
     assert buckets["60-69"]["prediction_count"] == 2
+    assert buckets["60-69"]["accuracy"] == 1.0
     assert buckets["60-69"]["win_rate"] == 1.0
     assert buckets["60-69"]["expected_return"] == pytest.approx(0.075)
     assert buckets["80-89"]["prediction_count"] == 2
+    assert buckets["80-89"]["accuracy"] == 0.5
     assert buckets["80-89"]["expected_return"] == pytest.approx(0.06)
     assert buckets["90-99"]["prediction_count"] == 1
     assert buckets["90-99"]["win_rate"] == 0.0
@@ -636,7 +737,7 @@ def test_backtest_excludes_rows_without_enough_future_data():
     assert backtest["10d"]["incomplete_future_count"] == 1
 
 
-def test_upper_band_reversal_is_wrong_when_exit_close_is_higher_inside_atr_hurdle():
+def test_upper_band_reversal_is_wrong_when_exit_close_is_flat_inside_atr_hurdle():
     df = pd.DataFrame(
         {
             "date": pd.bdate_range("2026-04-16", periods=12),
@@ -657,11 +758,11 @@ def test_upper_band_reversal_is_wrong_when_exit_close_is_higher_inside_atr_hurdl
     assert backtest["5d"]["prediction_count"] == 1
     assert backtest["5d"]["correct_count"] == 0
     assert backtest["5d"]["reversal_accuracy"] == 0.0
-    assert backtest["5d"]["flat_count"] == 0
+    assert backtest["5d"]["flat_count"] == 1
     prediction = backtest["5d"]["predictions"][0]
     assert prediction["signal_date"] == "2026-04-16"
     assert prediction["outcome_date"] == "2026-04-23"
-    assert prediction["actual_direction"] == "continuation"
+    assert prediction["actual_direction"] == "flat"
     assert prediction["is_correct"] is False
     assert prediction["trade_direction"] == "short"
     assert prediction["trade_return"] < 0
@@ -669,7 +770,7 @@ def test_upper_band_reversal_is_wrong_when_exit_close_is_higher_inside_atr_hurdl
     assert backtest["10d"]["reversal_accuracy"] == 0.0
 
 
-def test_reversal_scoring_accepts_exact_flat_exit():
+def test_reversal_scoring_rejects_exact_flat_exit():
     df = pd.DataFrame(
         {
             "date": pd.bdate_range("2025-01-02", periods=12),
@@ -689,11 +790,101 @@ def test_reversal_scoring_accepts_exact_flat_exit():
     prediction = backtest["5d"]["predictions"][0]
 
     assert prediction["actual_direction"] == "flat"
-    assert prediction["is_correct"] is True
+    assert prediction["is_correct"] is False
     assert prediction["trade_return"] == 0.0
-    assert backtest["5d"]["correct_count"] == 1
+    assert backtest["5d"]["correct_count"] == 0
     assert backtest["5d"]["flat_count"] == 1
-    assert backtest["5d"]["reversal_accuracy"] == 1.0
+    assert backtest["5d"]["reversal_accuracy"] == 0.0
+
+
+def test_half_atr_move_in_predicted_direction_is_correct():
+    df = pd.DataFrame(
+        {
+            "date": pd.bdate_range("2025-01-02", periods=12),
+            "close": [100.0] * 12,
+            "ATR14": [2.0] * 12,
+            "touched_side": [None] * 12,
+        }
+    )
+    df.loc[0, "touched_side"] = "Upper"
+    df.loc[5, "close"] = 101.0
+    df.loc[6, "touched_side"] = "Upper"
+    df.loc[11, "close"] = 99.0
+    decisions = {
+        0: _manual_decision(
+            _manual_horizon("prediction", "continuation", confidence=0.91),
+            _manual_horizon("no_prediction"),
+        ),
+        6: _manual_decision(
+            _manual_horizon("prediction", "reversal", confidence=0.91),
+            _manual_horizon("no_prediction"),
+        ),
+    }
+
+    backtest = run_decision_backtest(df, decisions_by_index=decisions)
+    predictions = {item["signal_date"]: item for item in backtest["5d"]["predictions"]}
+
+    assert backtest["5d"]["prediction_count"] == 2
+    assert backtest["5d"]["correct_count"] == 2
+    assert backtest["5d"]["flat_count"] == 0
+    assert predictions["2025-01-02"]["actual_direction"] == "continuation"
+    assert predictions["2025-01-10"]["actual_direction"] == "reversal"
+
+
+def test_intrahorizon_half_atr_target_hit_counts_even_when_exit_close_is_flat():
+    df = pd.DataFrame(
+        {
+            "date": pd.bdate_range("2025-01-02", periods=12),
+            "close": [100.0] * 12,
+            "high": [100.0, 102.0, 105.0] + [100.0] * 9,
+            "low": [100.0] * 12,
+            "ATR14": [10.0] * 12,
+            "touched_side": ["Upper"] + [None] * 11,
+        }
+    )
+    decisions = {
+        0: _manual_decision(
+            _manual_horizon("prediction", "continuation", confidence=0.91),
+            _manual_horizon("no_prediction"),
+        )
+    }
+
+    backtest = run_decision_backtest(df, decisions_by_index=decisions)
+    prediction = backtest["5d"]["predictions"][0]
+
+    assert prediction["actual_direction"] == "flat"
+    assert prediction["predicted_target_hit"] is True
+    assert prediction["target_atr_multiple"] == 0.5
+    assert prediction["is_correct"] is True
+    assert backtest["5d"]["correct_count"] == 1
+
+
+def test_signal_day_high_low_does_not_count_for_target_hit():
+    df = pd.DataFrame(
+        {
+            "date": pd.bdate_range("2025-01-02", periods=12),
+            "close": [100.0] * 12,
+            "high": [110.0] + [104.0] * 11,
+            "low": [100.0] * 12,
+            "ATR14": [10.0] * 12,
+            "touched_side": ["Upper"] + [None] * 11,
+        }
+    )
+    decisions = {
+        0: _manual_decision(
+            _manual_horizon("prediction", "continuation", confidence=0.91),
+            _manual_horizon("no_prediction"),
+        )
+    }
+
+    backtest = run_decision_backtest(df, decisions_by_index=decisions)
+    prediction = backtest["5d"]["predictions"][0]
+
+    assert prediction["actual_direction"] == "flat"
+    assert prediction["predicted_target_hit"] is False
+    assert prediction["continuation_target_hit"] is False
+    assert prediction["is_correct"] is False
+    assert backtest["5d"]["correct_count"] == 0
 
 
 def test_lower_band_reversal_veto_blocks_falling_knife_without_exhaustion():
@@ -758,6 +949,23 @@ def test_deployment_quality_gate_quarantines_weak_live_edge():
     assert "weak_reverse_accuracy" in gate["failures"]
 
 
+def test_deployment_quality_gate_quarantines_all_filtered_raw_predictions():
+    gate = _deployment_quality_gate(
+        {
+            "prediction_count": 0,
+            "deployment_filtered_prediction_count": 39,
+            "raw_prediction_count": 39,
+            "raw_accuracy": 0.564103,
+        }
+    )
+
+    assert gate["deployment_enabled"] is False
+    assert gate["status"] == "quarantined"
+    assert gate["failures"] == ["all_raw_predictions_quarantined"]
+    assert gate["raw_prediction_count"] == 39
+    assert gate["raw_accuracy"] == 0.564103
+
+
 def test_deployment_quality_gate_blocks_horizon_prediction_payload():
     decision = _manual_decision(
         _manual_horizon("prediction", "reversal", confidence=0.99),
@@ -783,8 +991,162 @@ def test_deployment_quality_gate_blocks_horizon_prediction_payload():
     assert gated["horizons"]["5d"]["blocked_prediction"]["predicted_direction"] == "reversal"
 
 
-def test_signal_quality_gate_keeps_good_family_when_direction_aggregate_is_weak():
-    rows = 42
+def test_direction_quality_gate_blocks_unseen_signal_family():
+    decision = _manual_decision(
+        _manual_horizon("prediction", "continuation", confidence=0.99, signal_id="new_continue"),
+        _manual_horizon("no_prediction"),
+    )
+    gates = {
+        "5d": {
+            "status": "passed",
+            "deployment_enabled": True,
+            "continuation": {
+                "status": "passed",
+                "deployment_enabled": True,
+                "direction": "continuation",
+                "failures": [],
+                "raw_prediction_count": 12,
+                "raw_correct_count": 12,
+                "raw_accuracy": 1.0,
+                "raw_wilson_lower_bound": 0.92,
+            },
+            "reversal": {
+                "status": "quarantined",
+                "deployment_enabled": False,
+                "direction": "reversal",
+                "failures": ["insufficient_direction_sample"],
+            },
+            "signals": {},
+        }
+    }
+
+    gated = _apply_direction_quality_gates_to_decision(decision, gates)
+
+    assert gated["horizons"]["5d"]["status"] == "no_prediction"
+    assert gated["horizons"]["5d"]["no_prediction_reason"] == "direction_quality_gate_failed"
+    assert gated["horizons"]["5d"]["deployment_quality_gate"]["failures"] == ["missing_signal_backtest"]
+    assert gated["horizons"]["5d"]["blocked_prediction"]["predicted_direction"] == "continuation"
+
+
+def test_existing_cached_decision_is_gated_before_payload_use():
+    df = pd.DataFrame(
+        {
+            "date": pd.bdate_range("2026-01-02", periods=1),
+            "close": [100.0],
+            "touched_side": ["Upper"],
+            "event_risk_blocked": [False],
+        }
+    )
+    decisions = {
+        0: _manual_decision(
+            _manual_horizon("prediction", "continuation", confidence=0.99, signal_id="new_continue"),
+            _manual_horizon("no_prediction"),
+        )
+    }
+    backtest_1y = {
+        "5d": {
+            "direction_quality_gate": {
+                "continuation": {
+                    "status": "passed",
+                    "deployment_enabled": True,
+                    "direction": "continuation",
+                    "failures": [],
+                },
+                "reversal": {
+                    "status": "quarantined",
+                    "deployment_enabled": False,
+                    "direction": "reversal",
+                    "failures": ["insufficient_direction_sample"],
+                },
+                "signals": {},
+            },
+            "coverage_repair_policies": [],
+        },
+        "10d": {
+            "direction_quality_gate": {},
+            "coverage_repair_policies": [],
+        },
+    }
+
+    decision = _ensure_decision_for_index(df, decisions, backtest_1y, 0)
+
+    assert decision["horizons"]["5d"]["status"] == "no_prediction"
+    assert decision["horizons"]["5d"]["deployment_quality_gate"]["failures"] == ["missing_signal_backtest"]
+    assert decision["horizons"]["5d"]["blocked_prediction"]["predicted_direction"] == "continuation"
+
+
+def test_existing_cached_decision_can_use_prior_hierarchical_evidence_gate():
+    dates = pd.bdate_range("2026-01-02", periods=70)
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "close": [100.0] * len(dates),
+            "touched_side": [None] * len(dates),
+            "event_risk_blocked": [False] * len(dates),
+        }
+    )
+    target_idx = 60
+    df.loc[target_idx, "touched_side"] = "Upper"
+    raw_predictions = [
+        {
+            "signal_date": str(dates[i * 3].date()),
+            "outcome_date": str(dates[i * 3 + 5].date()),
+            "horizon_days": 5,
+            "touched_side": "Upper",
+            "predicted_direction": "continuation",
+            "actual_direction": "continuation",
+            "is_correct": True,
+            "confidence_score": 70,
+            "signal_model_id": f"unique_continue_{i}",
+            "signal_tier": "regime",
+            "trade_return": 0.02,
+            "trade_return_atr": 0.5,
+        }
+        for i in range(18)
+    ]
+    decisions = {
+        target_idx: _manual_decision(
+            _manual_horizon("prediction", "continuation", confidence=0.70, tier="regime", signal_id="new_continue"),
+            _manual_horizon("no_prediction"),
+        )
+    }
+    backtest_1y = {
+        "5d": {
+            "_raw_predictions_for_gate": raw_predictions,
+            "direction_quality_gate": {
+                "continuation": {
+                    "status": "passed",
+                    "deployment_enabled": True,
+                    "direction": "continuation",
+                    "failures": [],
+                },
+                "reversal": {
+                    "status": "quarantined",
+                    "deployment_enabled": False,
+                    "direction": "reversal",
+                    "failures": ["insufficient_direction_sample"],
+                },
+                "signals": {},
+            },
+            "coverage_repair_policies": [],
+        },
+        "10d": {
+            "direction_quality_gate": {},
+            "coverage_repair_policies": [],
+        },
+    }
+
+    decision = _ensure_decision_for_index(df, decisions, backtest_1y, target_idx)
+
+    assert decision["horizons"]["5d"]["status"] == "prediction"
+    gate = decision["horizons"]["5d"]["deployment_quality_gate"]
+    assert gate["deployment_enabled"] is True
+    assert gate["evidence_scope"] == "tier_side_confidence"
+    assert gate["raw_prediction_count"] == 18
+
+
+def test_finalize_reports_prior_evidence_deployment_metrics_with_raw_diagnostics():
+    rows = 172
     df = pd.DataFrame(
         {
             "date": pd.bdate_range("2025-01-02", periods=rows),
@@ -792,8 +1154,8 @@ def test_signal_quality_gate_keeps_good_family_when_direction_aggregate_is_weak(
             "touched_side": [None] * rows,
         }
     )
-    touch_indices = [0, 6, 12, 18]
-    actual_reversal = {0, 12, 18}
+    touch_indices = [idx * 6 for idx in range(26)]
+    actual_reversal = set(touch_indices) - {6}
     for idx in touch_indices:
         df.loc[idx, "touched_side"] = "Upper"
         df.loc[idx + 5, "close"] = 90.0 if idx in actual_reversal else 110.0
@@ -807,26 +1169,155 @@ def test_signal_quality_gate_keeps_good_family_when_direction_aggregate_is_weak(
             _manual_horizon("prediction", "reversal", tier="core", signal_id="bad_reversal"),
             _manual_horizon("no_prediction"),
         ),
-        12: _manual_decision(
+    }
+    for idx in touch_indices[2:]:
+        decisions[idx] = _manual_decision(
             _manual_horizon("prediction", "reversal", tier="regime", signal_id="good_reversal"),
             _manual_horizon("no_prediction"),
-        ),
-        18: _manual_decision(
-            _manual_horizon("prediction", "reversal", tier="regime", signal_id="good_reversal"),
+        )
+
+    _, final_backtest = _finalize_deployment_quality(df, decisions)
+    five_day = final_backtest["5d"]
+    signals = five_day["direction_quality_gate"]["signals"]
+
+    assert five_day["backtest_policy"] == "walk_forward_prior_evidence_deployment_gate"
+    assert five_day["prediction_count"] == 19
+    assert five_day["accuracy"] == 1.0
+    assert five_day["coverage"] == pytest.approx(19 / 26)
+    assert five_day["reversal_accuracy"] == 1.0
+    assert five_day["raw_prediction_count"] == 26
+    assert five_day["raw_accuracy"] == pytest.approx(25 / 26)
+    assert five_day["raw_reverse_accuracy"] == pytest.approx(25 / 26)
+    assert five_day["raw_coverage"] == 1.0
+    assert five_day["raw_backtest_policy"] == "raw_walk_forward_no_in_sample_gate_or_repair"
+    assert five_day["signal_tier_counts"] == {"regime": 19}
+    assert signals["reversal:good_reversal"]["status"] == "passed"
+    assert signals["reversal:bad_reversal"]["deployment_enabled"] is False
+
+
+def test_prior_evidence_deployment_can_use_predeclared_broader_family_when_exact_is_under_sampled():
+    actual_by_index = {idx * 6: "continuation" for idx in range(25)}
+    df = _coverage_gate_frame(actual_by_index)
+    decisions = {
+        idx: _manual_decision(
+            _manual_horizon("prediction", "continuation", tier="regime", signal_id=f"unique_continue_{idx}"),
             _manual_horizon("no_prediction"),
-        ),
+        )
+        for idx in actual_by_index
     }
 
     _, final_backtest = _finalize_deployment_quality(df, decisions)
+    five_day = final_backtest["5d"]
 
-    assert final_backtest["5d"]["prediction_count"] == 2
-    assert final_backtest["5d"]["accuracy"] == 1.0
-    assert final_backtest["5d"]["reversal_accuracy"] == 1.0
-    assert final_backtest["5d"]["raw_reverse_accuracy"] == 0.75
-    assert final_backtest["5d"]["signal_tier_counts"] == {"regime": 2}
+    assert five_day["raw_prediction_count"] == 25
+    assert five_day["prediction_count"] == 20
+    assert five_day["accuracy"] == 1.0
+    assert five_day["coverage"] == 0.8
+    assert {
+        prediction["deployment_quality_gate"]["evidence_scope"]
+        for prediction in five_day["predictions"]
+    } == {"tier_side_confidence"}
 
 
-def test_coverage_expansion_maximizes_safe_calls_when_accuracy_is_preserved():
+def test_prior_evidence_deployment_can_use_completed_rows_before_report_window():
+    rows = 420
+    dates = pd.bdate_range("2024-01-02", periods=rows)
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "close": [100.0] * rows,
+            "touched_side": [None] * rows,
+        }
+    )
+    pre_report_indices = [idx * 6 for idx in range(20)]
+    report_idx = 300
+    all_touch_indices = [*pre_report_indices, report_idx]
+    for idx in all_touch_indices:
+        df.loc[idx, "touched_side"] = "Upper"
+        df.loc[idx, "close"] = 100.0
+        df.loc[idx + 5, "close"] = 110.0
+
+    decisions = {
+        idx: _manual_decision(
+            _manual_horizon("prediction", "continuation", tier="regime", signal_id="older_exact_continue"),
+            _manual_horizon("no_prediction"),
+        )
+        for idx in all_touch_indices
+    }
+
+    _, final_backtest = _finalize_deployment_quality(df, decisions)
+    five_day = final_backtest["5d"]
+
+    assert pd.Timestamp(five_day["period_start"]) > dates[pre_report_indices[-1]]
+    assert five_day["raw_prediction_count"] == 1
+    assert five_day["deployment_evidence_prediction_count"] == 21
+    assert five_day["prediction_count"] == 1
+    assert five_day["accuracy"] == 1.0
+    assert five_day["predictions"][0]["signal_date"] == str(dates[report_idx].date())
+    assert five_day["predictions"][0]["deployment_quality_gate"]["evidence_scope"] == "exact_signal_side"
+    assert five_day["predictions"][0]["deployment_quality_gate"]["raw_prediction_count"] == 20
+
+
+def test_prior_evidence_deployment_does_not_let_broad_family_override_bad_exact_history():
+    actual_by_index = {
+        0: "continuation",
+        6: "continuation",
+        12: "continuation",
+        18: "reversal",
+        24: "reversal",
+        30: "continuation",
+        36: "continuation",
+        42: "continuation",
+        48: "continuation",
+        54: "continuation",
+        60: "continuation",
+        66: "continuation",
+    }
+    df = _coverage_gate_frame(actual_by_index)
+    bad_exact_indices = [0, 6, 12, 18, 24, 66]
+    decisions = {}
+    for idx in actual_by_index:
+        signal_id = "bad_exact_continue" if idx in bad_exact_indices else f"good_family_{idx}"
+        decisions[idx] = _manual_decision(
+            _manual_horizon("prediction", "continuation", tier="regime", signal_id=signal_id),
+            _manual_horizon("no_prediction"),
+        )
+
+    _, final_backtest = _finalize_deployment_quality(df, decisions)
+    five_day = final_backtest["5d"]
+
+    assert five_day["raw_prediction_count"] == 12
+    assert all(
+        prediction.get("signal_model_id") != "bad_exact_continue"
+        for prediction in five_day["predictions"]
+    )
+
+
+def test_signal_gate_requires_own_minimum_sample_even_when_direction_passes():
+    actual_by_index = {idx * 6: "continuation" for idx in range(18)}
+    df = _coverage_gate_frame(actual_by_index)
+    decisions = {}
+    for ordinal, idx in enumerate(actual_by_index):
+        decisions[idx] = _manual_decision(
+            _manual_horizon(
+                "prediction",
+                "continuation",
+                signal_id="core_continue" if ordinal < 16 else "tiny_continue",
+            ),
+            _manual_horizon("no_prediction"),
+        )
+
+    _, final_backtest = _finalize_deployment_quality(df, decisions)
+    gates = final_backtest["5d"]["direction_quality_gate"]
+    signals = gates["signals"]
+
+    assert gates["continuation"]["status"] == "passed"
+    assert signals["continuation:core_continue"]["deployment_enabled"] is True
+    assert signals["continuation:tiny_continue"]["deployment_enabled"] is False
+    assert "insufficient_signal_sample" in signals["continuation:tiny_continue"]["failures"]
+
+
+def test_finalize_does_not_expand_coverage_on_the_same_scored_window():
     actual_by_index = {
         0: "continuation",
         6: "continuation",
@@ -876,24 +1367,29 @@ def test_coverage_expansion_maximizes_safe_calls_when_accuracy_is_preserved():
     signals = five_day["direction_quality_gate"]["signals"]
 
     assert "coverage_target" not in five_day
-    assert five_day["coverage_policy"] == "max_safe_accuracy_preserving"
-    assert five_day["coverage"] == 1.0
-    assert five_day["max_safe_coverage"] == 1.0
-    assert five_day["prediction_count"] == 10
-    assert five_day["max_safe_prediction_count"] == 10
-    assert five_day["accuracy"] == 1.0
-    assert five_day["continuation_accuracy"] == 1.0
-    assert five_day["reversal_accuracy"] == 1.0
-    assert five_day["coverage_expansion_signal_count"] == 1
-    assert five_day["coverage_repair_prediction_count"] == 4
-    assert signals["reversal:isolated_reversal"]["status"] == "coverage_expansion"
-    assert signals["reversal:isolated_reversal"]["deployment_enabled"] is True
-    assert signals["continuation:extra_continue"]["status"] == "passed"
-    assert signals["continuation:extra_continue"]["deployment_enabled"] is True
+    assert five_day["coverage_policy"] == "walk_forward_prior_evidence_deployment_gate"
+    assert five_day["backtest_policy"] == "walk_forward_prior_evidence_deployment_gate"
+    assert five_day["raw_backtest_policy"] == "raw_walk_forward_no_in_sample_gate_or_repair"
+    assert five_day["coverage"] == 0.0
+    assert five_day["max_safe_coverage"] == 0.0
+    assert five_day["prediction_count"] == 0
+    assert five_day["max_safe_prediction_count"] == 0
+    assert five_day["accuracy"] is None
+    assert five_day["continuation_accuracy"] is None
+    assert five_day["reversal_accuracy"] is None
+    assert five_day["raw_coverage"] == 0.7
+    assert five_day["raw_accuracy"] == pytest.approx(6 / 7)
+    assert five_day["coverage_expansion_signal_count"] == 0
+    assert five_day["coverage_repair_prediction_count"] == 0
+    assert signals["reversal:isolated_reversal"]["status"] == "quarantined"
+    assert signals["reversal:isolated_reversal"]["deployment_enabled"] is False
+    assert signals["continuation:extra_continue"]["status"] == "quarantined"
+    assert signals["continuation:extra_continue"]["deployment_enabled"] is False
+    assert "insufficient_signal_sample" in signals["continuation:extra_continue"]["failures"]
     assert signals["reversal:weak_reversal"]["deployment_enabled"] is False
 
 
-def test_coverage_expansion_accepts_bounded_accuracy_drop_for_material_coverage_gain():
+def test_finalize_keeps_raw_coverage_when_accuracy_drop_would_have_been_in_sample_selected():
     actual_by_index = {
         0: "continuation",
         6: "continuation",
@@ -935,16 +1431,19 @@ def test_coverage_expansion_accepts_bounded_accuracy_drop_for_material_coverage_
     weak_signal = five_day["direction_quality_gate"]["signals"]["continuation:weak_continue"]
 
     assert "coverage_target" not in five_day
-    assert five_day["coverage_policy"] == "max_safe_accuracy_preserving"
-    assert five_day["coverage"] == 1.0
-    assert five_day["max_safe_coverage"] == 1.0
-    assert five_day["prediction_count"] == 10
-    assert five_day["max_safe_prediction_count"] == 10
-    assert five_day["accuracy"] == 0.9
+    assert five_day["coverage_policy"] == "walk_forward_prior_evidence_deployment_gate"
+    assert five_day["backtest_policy"] == "walk_forward_prior_evidence_deployment_gate"
+    assert five_day["raw_backtest_policy"] == "raw_walk_forward_no_in_sample_gate_or_repair"
+    assert five_day["coverage"] == 0.0
+    assert five_day["max_safe_coverage"] == 0.0
+    assert five_day["prediction_count"] == 0
+    assert five_day["max_safe_prediction_count"] == 0
+    assert five_day["accuracy"] is None
+    assert five_day["raw_coverage"] == 0.5
     assert five_day["raw_prediction_count"] == 5
     assert five_day["raw_accuracy"] == 0.8
     assert five_day["coverage_expansion_signal_count"] == 0
-    assert five_day["coverage_repair_prediction_count"] == 7
+    assert five_day["coverage_repair_prediction_count"] == 0
     assert weak_signal["deployment_enabled"] is False
     assert weak_signal.get("coverage_expansion") is None
 
@@ -1138,6 +1637,72 @@ def test_expanding_percentiles_do_not_use_future_rows():
     )
 
 
+def test_model_feature_inputs_do_not_change_when_future_rows_change():
+    target_idx = 100
+    df = _base_frame(180)
+    context_frames = {
+        "QQQ": _base_frame(180),
+        "XLK": _base_frame(180),
+    }
+
+    baseline = _prepare_feature_frame(
+        df,
+        symbol="TEST",
+        earnings_dates=set(),
+        context_frames=context_frames,
+    )
+    target_date = pd.Timestamp(baseline.loc[target_idx, "date"]).normalize()
+
+    def distort_future_rows(frame: pd.DataFrame) -> pd.DataFrame:
+        changed = frame.copy()
+        future_mask = pd.to_datetime(changed["date"], errors="coerce").dt.normalize() > target_date
+        for col in ("open", "high", "low", "close", "BB_upper", "BB_middle"):
+            if col in changed.columns:
+                changed.loc[future_mask, col] = changed.loc[future_mask, col] * 3.7 + 11.0
+        if "BB_lower" in changed.columns:
+            changed.loc[future_mask, "BB_lower"] = changed.loc[future_mask, "BB_lower"] * 0.2
+        if "volume" in changed.columns:
+            changed.loc[future_mask, "volume"] = changed.loc[future_mask, "volume"] * 7.0 + 12345.0
+        return changed
+
+    changed = _prepare_feature_frame(
+        distort_future_rows(df),
+        symbol="TEST",
+        earnings_dates=set(),
+        context_frames={symbol: distort_future_rows(frame) for symbol, frame in context_frames.items()},
+    )
+
+    audited_columns = [
+        col
+        for col in (*_MODEL_FEATURES, "touched_side", "analysis_side", "event_risk_blocked")
+        if col in baseline.columns
+    ]
+    for col in audited_columns:
+        before = baseline.loc[:target_idx, col]
+        after = changed.loc[:target_idx, col]
+        if before.dtype == object or after.dtype == object:
+            assert before.fillna("__NA__").astype(str).tolist() == after.fillna("__NA__").astype(str).tolist(), col
+            continue
+        before_values = pd.to_numeric(before, errors="coerce").to_numpy(dtype=float)
+        after_values = pd.to_numeric(after, errors="coerce").to_numpy(dtype=float)
+        assert np.allclose(before_values, after_values, equal_nan=True, rtol=1e-12, atol=1e-12), col
+
+
+def test_model_feature_schema_does_not_include_outcome_columns():
+    forbidden_fragments = ("future", "outcome", "actual", "label", "forward")
+
+    for feature in _MODEL_FEATURES:
+        assert not any(fragment in feature.lower() for fragment in forbidden_fragments), feature
+
+
+def test_feature_engineering_does_not_use_negative_time_shifts():
+    features_path = Path(tee.__file__).parent / "features.py"
+    text = features_path.read_text()
+
+    for forbidden in (".shift(-", ".pct_change(-"):
+        assert forbidden not in text
+
+
 def test_expanded_model_feature_frame_contains_ta_inputs():
     feature_df = _prepare_feature_frame(_base_frame(180), symbol="TEST", earnings_dates=set())
 
@@ -1248,7 +1813,7 @@ def test_as_of_date_exact_trading_day_uses_same_date():
     assert payload["date_was_snapped"] is False
 
 
-def test_historical_as_of_uses_cached_context_without_point_in_time_rebuild(monkeypatch):
+def test_historical_as_of_uses_cached_point_in_time_context_without_rebuild(monkeypatch):
     frame = _minimal_feature_context_frame()
     may6_prediction = _manual_decision(
         _manual_horizon("prediction", "reversal", confidence=0.91),
@@ -1256,14 +1821,20 @@ def test_historical_as_of_uses_cached_context_without_point_in_time_rebuild(monk
     )
 
     def fail_point_in_time_rebuild(*_args, **_kwargs):
-        pytest.fail("Selected-date payloads must reuse the cached model context.")
+        pytest.fail("Selected-date payloads must reuse the cached point-in-time context when available.")
 
-    monkeypatch.setattr(tee, "_point_in_time_context_for_index", fail_point_in_time_rebuild)
+    monkeypatch.setattr(tee_payload, "_finalized_point_in_time_context", fail_point_in_time_rebuild)
     context = {
         "symbol": "GOOGL",
         "feature_df": frame,
         "decisions_by_index": {1: may6_prediction},
         "backtest_1y": _minimal_backtest_payload(),
+        "_point_in_time_cache": {
+            1: {
+                "decisions_by_index": {1: may6_prediction},
+                "backtest_1y": _minimal_backtest_payload(),
+            }
+        },
     }
 
     payload = build_entry_decision_from_context(context, as_of_date="2026-05-06")
@@ -1274,6 +1845,53 @@ def test_historical_as_of_uses_cached_context_without_point_in_time_rebuild(monk
     assert payload["horizons"]["10d"]["predicted_direction"] == "short"
     assert payload["backtest_1y"]["10d"]["open_predictions"][0]["signal_date"] == "2026-05-06"
     assert payload["backtest_1y"]["10d"]["open_predictions"][0]["predicted_direction"] == "short"
+
+
+def test_historical_as_of_payload_backtest_is_cut_to_selected_date():
+    df = _base_frame(95)
+    target_date = pd.Timestamp(df["date"].iloc[70]).strftime("%Y-%m-%d")
+
+    payload = build_entry_decision_from_frame("TEST", df, as_of_date=target_date, earnings_dates=set())
+
+    assert payload["as_of_date"] == target_date
+    assert payload["chart_data"][-1]["date"] == target_date
+    for result in payload["backtest_1y"].values():
+        if not isinstance(result, dict):
+            continue
+        assert pd.Timestamp(result["period_end"]) <= pd.Timestamp(target_date)
+        for key in ("predictions", "recent_predictions", "raw_recent_predictions"):
+            for prediction in result.get(key, []) or []:
+                assert pd.Timestamp(prediction["signal_date"]) <= pd.Timestamp(target_date)
+
+
+def test_entry_decision_model_logic_has_no_target_symbol_specific_rules():
+    model_dir = Path(tee.__file__).parent
+    model_files = ("adaptive.py", "empirical.py", "model.py", "settings.py", "quality.py", "deployment.py")
+    text = "\n".join((model_dir / filename).read_text() for filename in model_files)
+
+    screenshot_symbols = (
+        "NVDA",
+        "GOOGL",
+        "GOOG",
+        "AAPL",
+        "MSFT",
+        "AMZN",
+        "AVGO",
+        "TSLA",
+        "META",
+        "BRK.B",
+        "BRK-B",
+        "WMT",
+        "LLY",
+        "MU",
+        "JPM",
+        "AMD",
+        "XOM",
+        "V",
+    )
+    for symbol in screenshot_symbols:
+        assert f'"{symbol}"' not in text
+        assert f"'{symbol}'" not in text
 
 
 def test_latest_payload_keeps_prior_open_prediction_marker(monkeypatch):
@@ -1316,7 +1934,7 @@ def test_latest_payload_keeps_prior_open_prediction_marker(monkeypatch):
     assert open_predictions[0]["elapsed_sessions"] == 1
     assert open_predictions[0]["remaining_sessions"] == 9
     assert open_predictions[0]["current_close"] == 102.5
-    assert open_predictions[0]["interim_status"] == "working"
+    assert open_predictions[0]["interim_status"] == "flat"
 
 
 def test_as_of_date_weekend_snaps_to_previous_trading_day():

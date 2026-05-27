@@ -16,7 +16,6 @@ from .quality import (
     _finalize_deployment_quality,
 )
 
-_OPEN_PREDICTION_CHART_LOOKBACK_SESSIONS = 45
 
 def _chart_float(value: Any) -> float | None:
     num = _safe_num(value, np.nan)
@@ -58,14 +57,6 @@ def _prediction_end_date(feature_df: pd.DataFrame, idx: int, horizon: int) -> st
     if pd.isna(signal_date):
         return None
     return (signal_date + pd.offsets.BDay(horizon)).strftime("%Y-%m-%d")
-
-
-def _open_prediction_price_window(feature_df: pd.DataFrame, idx: int) -> list[dict]:
-    if feature_df.empty or idx < 0 or idx >= len(feature_df):
-        return []
-    start_idx = max(0, idx - _OPEN_PREDICTION_CHART_LOOKBACK_SESSIONS)
-    window_df = feature_df.iloc[start_idx:].copy()
-    return [_chart_row_payload(row) for _, row in window_df.iterrows()]
 
 
 def _feature_frame_through_index(feature_df: pd.DataFrame, resolved_idx: int) -> pd.DataFrame:
@@ -118,17 +109,21 @@ def _ensure_decision_for_index(
             row_index=idx,
             force_prediction=force_prediction,
         )
-        direction_gates = {
-            horizon_key: result.get("direction_quality_gate", {})
-            for horizon_key, result in backtest_1y.items()
-            if isinstance(result, dict)
-        }
-        _apply_direction_quality_gates_to_decision(decisions_by_index[idx], direction_gates)
-        _apply_coverage_repair_policies(
-            feature_df,
-            {idx: decisions_by_index[idx]},
-            _coverage_repair_policies_by_horizon(backtest_1y),
-        )
+    direction_gates = {
+        horizon_key: result
+        for horizon_key, result in backtest_1y.items()
+        if isinstance(result, dict)
+    }
+    _apply_direction_quality_gates_to_decision(
+        decisions_by_index[idx],
+        direction_gates,
+        signal_date=feature_df.iloc[idx].get("date"),
+    )
+    _apply_coverage_repair_policies(
+        feature_df,
+        {idx: decisions_by_index[idx]},
+        _coverage_repair_policies_by_horizon(backtest_1y),
+    )
     return decisions_by_index[idx]
 
 
@@ -270,7 +265,6 @@ def _open_prediction_row(
         "signal_model_id": playbook.get("id") or (playbook.get("profile") or {}).get("id"),
         "signal_precision": playbook.get("precision"),
         "signal_tier": playbook.get("tier") or (playbook.get("profile") or {}).get("tier"),
-        "price_window": _open_prediction_price_window(feature_df, idx),
     }
 
 
@@ -462,6 +456,7 @@ def _trade_direction_metrics(predictions: list[dict], direction: str) -> dict:
 
 def _present_backtest_result(item: dict) -> dict:
     out = deepcopy(item)
+    out.pop("_raw_predictions_for_gate", None)
     predictions = [
         _present_prediction_row(prediction)
         for prediction in out.get("predictions") or []
@@ -699,7 +694,6 @@ def _get_entry_context_cached(symbol: str, cache_day: str) -> tuple[str, pd.Data
     )
     decisions_by_index, backtest_1y = _finalized_point_in_time_context(
         feature_df,
-        force_latest_prediction=True,
     )
     context_meta = build_entry_context_metadata(symbol, feature_df, backtest_1y)
     return resolved_symbol or symbol, feature_df, decisions_by_index, backtest_1y, point_in_time_cache, context_meta
@@ -718,23 +712,32 @@ def _build_payload_from_context(
     parsed_as_of_date = _parse_as_of_date(as_of_date)
     resolved_idx, date_was_snapped = _resolve_as_of_index(feature_df, parsed_as_of_date)
     latest_selected = resolved_idx == len(feature_df) - 1
-    scoped_feature_df = feature_df if latest_selected else _feature_frame_through_index(feature_df, resolved_idx)
-    selected_idx = resolved_idx
+    if latest_selected:
+        scoped_feature_df = feature_df
+        scoped_decisions_by_index = decisions_by_index
+        scoped_backtest = backtest_1y
+        selected_idx = resolved_idx
+    else:
+        scoped_feature_df, scoped_decisions_by_index, scoped_backtest = _point_in_time_context_for_index(
+            feature_df,
+            resolved_idx,
+            point_in_time_cache=point_in_time_cache,
+        )
+        selected_idx = len(scoped_feature_df) - 1
 
-    selected_row = feature_df.iloc[selected_idx]
+    selected_row = scoped_feature_df.iloc[selected_idx]
     selected_decision = deepcopy(
         _ensure_decision_for_index(
-            feature_df,
-            decisions_by_index,
-            backtest_1y,
+            scoped_feature_df,
+            scoped_decisions_by_index,
+            scoped_backtest,
             selected_idx,
-            force_prediction=latest_selected,
         )
     )
     scoped_backtest_1y = _attach_open_predictions_to_backtest(
-        backtest_1y,
+        scoped_backtest,
         scoped_feature_df,
-        decisions_by_index=decisions_by_index,
+        decisions_by_index=scoped_decisions_by_index,
         selected_idx=selected_idx,
         selected_decision=selected_decision,
     )

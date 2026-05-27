@@ -80,7 +80,6 @@ def test_list_open_entry_signals_serializes_dates_without_running_schema_ddl(mon
                     "price_data_end_date": date(2026, 5, 19),
                     "key_reasons": None,
                     "playbook": None,
-                    "price_window": None,
                     "updated_at": date(2026, 5, 20),
                 }
             ]

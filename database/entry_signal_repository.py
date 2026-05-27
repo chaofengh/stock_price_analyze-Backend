@@ -50,14 +50,13 @@ _UPSERT_FIELDS = [
     "price_data_end_date",
     "key_reasons",
     "playbook",
-    "price_window",
 ]
 
 _DB_COLUMN_BY_FIELD = {
     "current_date": "current_price_date",
 }
 
-_JSON_COLUMNS = {"key_reasons", "playbook", "price_window"}
+_JSON_COLUMNS = {"key_reasons", "playbook"}
 _SCHEMA_LOCK = Lock()
 _SCHEMA_READY = False
 _SCHEMA_ADVISORY_LOCK_KEY = "entry_decision_signals_schema_v2"
@@ -270,11 +269,16 @@ def close_open_entry_signals_absent_from_keys(
 
     params: list = [_date_text(current_date), _date_text(current_date), normalized, horizons]
     keep_sql = ""
-    normalized_open_keys = {
-        (_date_text(signal_date), int(horizon))
-        for signal_date, horizon in open_keys or set()
-        if _date_text(signal_date) and horizon
-    }
+    horizon_set = set(horizons)
+    normalized_open_keys = set()
+    for signal_date, horizon in open_keys or set():
+        signal_date_text = _date_text(signal_date)
+        try:
+            horizon_int = int(horizon)
+        except (TypeError, ValueError):
+            continue
+        if signal_date_text and horizon_int in horizon_set:
+            normalized_open_keys.add((signal_date_text, horizon_int))
     if normalized_open_keys:
         keep_clauses = []
         for signal_date, horizon in sorted(normalized_open_keys):
@@ -393,7 +397,6 @@ def list_open_entry_signals(symbols: Iterable[str] | None = None, limit: int = 2
                         price_data_end_date,
                         key_reasons,
                         playbook,
-                        price_window,
                         updated_at
                     FROM entry_decision_signals
                     WHERE status = 'open'

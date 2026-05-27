@@ -50,10 +50,6 @@ def test_open_entry_signal_rows_from_current_payload_carry_model_context():
                 "signal_model_id": "empirical_recent_side_only_6",
                 "signal_precision": 0.833333,
                 "signal_tier": "regime",
-                "price_window": [
-                    {"date": "2026-05-14", "open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0},
-                    {"date": "2026-05-15", "open": 100.0, "high": 102.0, "low": 99.5, "close": 101.0},
-                ],
             }
         ]
     )
@@ -73,7 +69,6 @@ def test_open_entry_signal_rows_from_current_payload_carry_model_context():
     assert row["price_data_end_date"] == "2026-05-15"
     assert row["key_reasons"] == [{"feature": "Empirical Regime Tape", "value": 6}]
     assert row["playbook"]["id"] == "test-playbook"
-    assert row["price_window"][0]["date"] == "2026-05-14"
 
 
 def test_sync_entry_signals_closes_existing_open_signal_when_outcome_is_available(monkeypatch):

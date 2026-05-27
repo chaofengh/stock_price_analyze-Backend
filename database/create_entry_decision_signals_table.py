@@ -43,7 +43,6 @@ ENTRY_DECISION_SIGNALS_SCHEMA_SQL = (
             price_data_end_date DATE,
             key_reasons JSONB,
             playbook JSONB,
-            price_window JSONB,
             created_at TIMESTAMP NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
             closed_at TIMESTAMP,
@@ -65,10 +64,6 @@ ENTRY_DECISION_SIGNALS_SCHEMA_SQL = (
     """
         ALTER TABLE entry_decision_signals
         ADD COLUMN IF NOT EXISTS prediction_end_date DATE;
-    """,
-    """
-        ALTER TABLE entry_decision_signals
-        ADD COLUMN IF NOT EXISTS price_window JSONB;
     """,
     """
         DO $$

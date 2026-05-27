@@ -161,7 +161,6 @@ def _row_from_open_prediction(symbol: str, payload: dict, horizon_key: str, pred
         "signal_tier": prediction.get("signal_tier"),
         "key_reasons": current_horizon.get("key_reasons") if current_horizon else None,
         "playbook": playbook,
-        "price_window": prediction.get("price_window"),
     }
 
 
@@ -206,7 +205,6 @@ def _row_from_closed_prediction(symbol: str, payload: dict, horizon_key: str, pr
         "signal_tier": prediction.get("signal_tier"),
         "key_reasons": None,
         "playbook": None,
-        "price_window": prediction.get("price_window"),
     }
 
 

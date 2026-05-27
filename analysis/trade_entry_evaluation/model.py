@@ -15,8 +15,8 @@ def _model_metadata(
     return {
         "type": "blocked_walk_forward_validated_ensemble",
         "positive_label": "continuation",
-        "training_scope": "all_available_days",
-        "prediction_scope": "latest_day_always_or_bollinger_touch_days",
+        "training_scope": "bollinger_touch_events",
+        "prediction_scope": "bollinger_touch_days",
         "training_sample_count": int(training_sample_count),
         "continuation_training_count": int(positive_count),
         "reversal_training_count": int(negative_count),
@@ -32,11 +32,38 @@ def _model_metadata(
         "continuation_hurdle_atr": _DIRECTION_ATR_THRESHOLD,
         "direction_scoring_policy": "close_to_close_trade_sign",
         "flat_price_absolute_tolerance": _FLAT_PRICE_ABSOLUTE_TOLERANCE,
-        "flat_reversal_predictions_count_as_correct": True,
+        "flat_reversal_predictions_count_as_correct": False,
+        "flat_tolerance_atr_multiple": _DIRECTION_ATR_THRESHOLD,
+        "label_sampling_policy": "bollinger_touch_events_only",
         "deployment_min_backtest_calls": _DEPLOY_MIN_BACKTEST_CALLS,
+        "deployment_min_signal_backtest_calls": _DEPLOY_MIN_SIGNAL_BACKTEST_CALLS,
         "deployment_min_backtest_accuracy": _DEPLOY_MIN_BACKTEST_ACCURACY,
         "deployment_min_backtest_reverse_accuracy": _DEPLOY_MIN_BACKTEST_REVERSE_ACCURACY,
         "deployment_min_backtest_continue_accuracy": _DEPLOY_MIN_BACKTEST_CONTINUE_ACCURACY,
+        "deployment_min_backtest_wilson": _DEPLOY_MIN_BACKTEST_WILSON,
+        "deployment_min_backtest_reverse_wilson": _DEPLOY_MIN_BACKTEST_REVERSE_WILSON,
+        "deployment_min_backtest_continue_wilson": _DEPLOY_MIN_BACKTEST_CONTINUE_WILSON,
+        "deployment_min_signal_accuracy": _DEPLOY_MIN_SIGNAL_BACKTEST_ACCURACY,
+        "deployment_min_signal_reverse_wilson": _DEPLOY_MIN_SIGNAL_BACKTEST_REVERSE_WILSON,
+        "deployment_min_signal_continue_wilson": _DEPLOY_MIN_SIGNAL_BACKTEST_CONTINUE_WILSON,
+        "deployment_min_fallback_signal_backtest_calls": _DEPLOY_MIN_FALLBACK_SIGNAL_BACKTEST_CALLS,
+        "deployment_min_fallback_signal_accuracy": _DEPLOY_MIN_FALLBACK_SIGNAL_ACCURACY,
+        "deployment_min_fallback_signal_reverse_wilson": _DEPLOY_MIN_FALLBACK_SIGNAL_REVERSE_WILSON,
+        "deployment_min_fallback_signal_continue_wilson": _DEPLOY_MIN_FALLBACK_SIGNAL_CONTINUE_WILSON,
+        "deployment_min_broad_family_backtest_calls": _DEPLOY_MIN_BROAD_FAMILY_BACKTEST_CALLS,
+        "deployment_min_broad_family_accuracy": _DEPLOY_MIN_BROAD_FAMILY_ACCURACY,
+        "deployment_min_broad_family_wilson": _DEPLOY_MIN_BROAD_FAMILY_WILSON,
+        "deployment_min_signal_expected_return": _DEPLOY_MIN_SIGNAL_EXPECTED_RETURN,
+        "deployment_evidence_lookback_days": _DEPLOYMENT_EVIDENCE_LOOKBACK_DAYS,
+        "deployment_wilson_z_value": _DEPLOYMENT_WILSON_Z,
+        "empirical_reversal_min_precision": _EMPIRICAL_REVERSAL_MIN_PRECISION,
+        "empirical_continuation_min_precision": _EMPIRICAL_CONTINUATION_MIN_PRECISION,
+        "empirical_reversal_min_wilson": _EMPIRICAL_REVERSAL_MIN_WILSON,
+        "empirical_continuation_min_wilson": _EMPIRICAL_CONTINUATION_MIN_WILSON,
+        "empirical_reversal_min_matches": _EMPIRICAL_REVERSAL_MIN_MATCHES,
+        "empirical_continuation_min_matches": _EMPIRICAL_CONTINUATION_MIN_MATCHES,
+        "empirical_reversal_min_recent_precision": _EMPIRICAL_REVERSAL_MIN_RECENT_PRECISION,
+        "empirical_continuation_min_recent_precision": _EMPIRICAL_CONTINUATION_MIN_RECENT_PRECISION,
         "feature_count": len(_MODEL_FEATURES),
         "candidate_search_count": len(_candidate_specs()),
         "training_history_period": _TRAINING_HISTORY_PERIOD,
@@ -146,7 +173,9 @@ def _label_for_index(feature_df: pd.DataFrame, idx: int, horizon: int) -> int | 
     row = feature_df.iloc[idx]
     if _safe_bool(row.get("event_risk_blocked")):
         return None
-    training_side = _training_side_for_row(row)
+    # Labels are event-sampled: only rows where a Bollinger entry setup actually occurred
+    # can teach the entry model. Non-touch analysis rows are context, not trades.
+    training_side = row.get("touched_side")
     if training_side not in ("Upper", "Lower"):
         return None
     signal_close = _safe_num(row.get("close"), np.nan)
@@ -170,7 +199,7 @@ def _build_training_matrix(
     indices: list[int] = []
 
     for idx in range(target_idx):
-        # All historical bars can train the model once their horizon outcome is known.
+        # Historical touch events train the model once their horizon outcome is known.
         if idx + horizon > target_idx:
             continue
         label = _label_for_index(feature_df, idx, horizon)

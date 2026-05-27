@@ -1,49 +1,93 @@
 from __future__ import annotations
 
+from typing import Any
+
 from .settings import *
 from .features import *
 from .model import *
 from .backtest import *
-from .adaptive import _adaptive_training_summary, _empirical_regime_attrs
+from .deployment import *
+from .adaptive import _adaptive_training_summary
+from .empirical import _empirical_regime_attrs
 from .playbooks import _actual_direction_for_index
 
 def _deployment_quality_gate(backtest: dict) -> dict:
     prediction_count = int(_safe_num(backtest.get("prediction_count"), 0))
+    raw_prediction_count = int(
+        _safe_num(
+            backtest.get("raw_prediction_count"),
+            _safe_num(backtest.get("deployment_filtered_prediction_count"), 0),
+        )
+    )
     failures: list[str] = []
 
     if prediction_count == 0:
+        if raw_prediction_count > 0:
+            failures.append("all_raw_predictions_quarantined")
         return {
-            "status": "idle",
-            "deployment_enabled": True,
-            "failures": [],
+            "status": "quarantined" if failures else "idle",
+            "deployment_enabled": not failures,
+            "failures": failures,
             "min_prediction_count": _DEPLOY_MIN_BACKTEST_CALLS,
             "min_accuracy": _DEPLOY_MIN_BACKTEST_ACCURACY,
             "min_reverse_accuracy": _DEPLOY_MIN_BACKTEST_REVERSE_ACCURACY,
             "min_continue_accuracy": _DEPLOY_MIN_BACKTEST_CONTINUE_ACCURACY,
-            "raw_prediction_count": 0,
-            "raw_accuracy": None,
-            "raw_reverse_accuracy": None,
-            "raw_continue_accuracy": None,
+            "min_wilson_lower_bound": _DEPLOY_MIN_BACKTEST_WILSON,
+            "min_reverse_wilson_lower_bound": _DEPLOY_MIN_BACKTEST_REVERSE_WILSON,
+            "min_continue_wilson_lower_bound": _DEPLOY_MIN_BACKTEST_CONTINUE_WILSON,
+            "wilson_z_value": _DEPLOYMENT_WILSON_Z,
+            "raw_prediction_count": raw_prediction_count,
+            "raw_correct_count": 0,
+            "raw_accuracy": backtest.get("raw_accuracy"),
+            "raw_wilson_lower_bound": None,
+            "raw_reverse_accuracy": backtest.get("raw_reverse_accuracy"),
+            "raw_reverse_wilson_lower_bound": None,
+            "raw_continue_accuracy": backtest.get("raw_continue_accuracy"),
+            "raw_continue_wilson_lower_bound": None,
         }
 
     accuracy = backtest.get("accuracy")
+    correct_count = _gate_correct_count(backtest.get("correct_count"), accuracy, prediction_count)
+    wilson = _gate_wilson(correct_count, prediction_count)
     reversal_accuracy = backtest.get("reversal_accuracy")
     continuation_accuracy = backtest.get("continuation_accuracy")
     reversal_call_count = int(_safe_num(backtest.get("reversal_call_count"), 0))
     continuation_call_count = int(_safe_num(backtest.get("continuation_call_count"), 0))
+    reversal_correct_count = _gate_correct_count(
+        backtest.get("reversal_correct_count"),
+        reversal_accuracy,
+        reversal_call_count,
+    )
+    continuation_correct_count = _gate_correct_count(
+        backtest.get("continuation_correct_count"),
+        continuation_accuracy,
+        continuation_call_count,
+    )
+    reversal_wilson = _gate_wilson(reversal_correct_count, reversal_call_count)
+    continuation_wilson = _gate_wilson(continuation_correct_count, continuation_call_count)
 
     if prediction_count < _DEPLOY_MIN_BACKTEST_CALLS:
         failures.append("insufficient_deployed_sample")
     if accuracy is None or _safe_num(accuracy, 0.0) < _DEPLOY_MIN_BACKTEST_ACCURACY:
         failures.append("weak_deployed_accuracy")
+    if wilson is None or wilson < _DEPLOY_MIN_BACKTEST_WILSON:
+        failures.append("weak_deployed_wilson")
     if reversal_call_count > 0 and (
         reversal_accuracy is None or _safe_num(reversal_accuracy, 0.0) < _DEPLOY_MIN_BACKTEST_REVERSE_ACCURACY
     ):
         failures.append("weak_reverse_accuracy")
+    if reversal_call_count > 0 and (
+        reversal_wilson is None or reversal_wilson < _DEPLOY_MIN_BACKTEST_REVERSE_WILSON
+    ):
+        failures.append("weak_reverse_wilson")
     if continuation_call_count > 0 and (
         continuation_accuracy is None or _safe_num(continuation_accuracy, 0.0) < _DEPLOY_MIN_BACKTEST_CONTINUE_ACCURACY
     ):
         failures.append("weak_continue_accuracy")
+    if continuation_call_count > 0 and (
+        continuation_wilson is None or continuation_wilson < _DEPLOY_MIN_BACKTEST_CONTINUE_WILSON
+    ):
+        failures.append("weak_continue_wilson")
 
     return {
         "status": "quarantined" if failures else "passed",
@@ -53,10 +97,18 @@ def _deployment_quality_gate(backtest: dict) -> dict:
         "min_accuracy": _DEPLOY_MIN_BACKTEST_ACCURACY,
         "min_reverse_accuracy": _DEPLOY_MIN_BACKTEST_REVERSE_ACCURACY,
         "min_continue_accuracy": _DEPLOY_MIN_BACKTEST_CONTINUE_ACCURACY,
+        "min_wilson_lower_bound": _DEPLOY_MIN_BACKTEST_WILSON,
+        "min_reverse_wilson_lower_bound": _DEPLOY_MIN_BACKTEST_REVERSE_WILSON,
+        "min_continue_wilson_lower_bound": _DEPLOY_MIN_BACKTEST_CONTINUE_WILSON,
+        "wilson_z_value": _DEPLOYMENT_WILSON_Z,
         "raw_prediction_count": prediction_count,
+        "raw_correct_count": correct_count,
         "raw_accuracy": accuracy,
+        "raw_wilson_lower_bound": wilson,
         "raw_reverse_accuracy": reversal_accuracy,
+        "raw_reverse_wilson_lower_bound": reversal_wilson,
         "raw_continue_accuracy": continuation_accuracy,
+        "raw_continue_wilson_lower_bound": continuation_wilson,
     }
 
 
@@ -65,6 +117,23 @@ def _horizon_from_key(horizon_key: str) -> int:
         return int(str(horizon_key).lower().replace("d", ""))
     except (TypeError, ValueError):
         return 0
+
+
+def _gate_correct_count(correct_count: Any, accuracy: Any, sample_count: int) -> int:
+    raw_correct = int(_safe_num(correct_count, -1))
+    if raw_correct >= 0:
+        return raw_correct
+    if sample_count <= 0 or accuracy is None:
+        return 0
+    return int(round(_safe_num(accuracy, 0.0) * sample_count))
+
+
+def _direction_min_wilson(direction: str) -> float:
+    return (
+        _DEPLOY_MIN_BACKTEST_CONTINUE_WILSON
+        if direction == "continuation"
+        else _DEPLOY_MIN_BACKTEST_REVERSE_WILSON
+    )
 
 
 def _quality_gate_blocked_horizon(horizon_key: str, original: dict, gate: dict) -> dict:
@@ -93,18 +162,32 @@ def _quality_gate_blocked_horizon(horizon_key: str, original: dict, gate: dict) 
 def _direction_quality_gate(backtest: dict, direction: str) -> dict:
     if direction == "continuation":
         call_count = int(_safe_num(backtest.get("continuation_call_count"), 0))
+        correct_count = _gate_correct_count(
+            backtest.get("continuation_correct_count"),
+            backtest.get("continuation_accuracy"),
+            call_count,
+        )
         accuracy = backtest.get("continuation_accuracy")
         min_accuracy = _DEPLOY_MIN_BACKTEST_CONTINUE_ACCURACY
     else:
         call_count = int(_safe_num(backtest.get("reversal_call_count"), 0))
+        correct_count = _gate_correct_count(
+            backtest.get("reversal_correct_count"),
+            backtest.get("reversal_accuracy"),
+            call_count,
+        )
         accuracy = backtest.get("reversal_accuracy")
         min_accuracy = _DEPLOY_MIN_BACKTEST_REVERSE_ACCURACY
+    wilson = _gate_wilson(correct_count, call_count)
+    min_wilson = _direction_min_wilson(direction)
 
     failures: list[str] = []
     if call_count < _DEPLOY_MIN_BACKTEST_CALLS:
         failures.append("insufficient_direction_sample")
     if accuracy is None or _safe_num(accuracy, 0.0) < min_accuracy:
         failures.append(f"weak_{direction}_accuracy")
+    if wilson is None or wilson < min_wilson:
+        failures.append(f"weak_{direction}_wilson")
 
     return {
         "status": "quarantined" if failures else "passed",
@@ -113,8 +196,12 @@ def _direction_quality_gate(backtest: dict, direction: str) -> dict:
         "failures": failures,
         "min_prediction_count": _DEPLOY_MIN_BACKTEST_CALLS,
         "min_accuracy": min_accuracy,
+        "min_wilson_lower_bound": min_wilson,
+        "wilson_z_value": _DEPLOYMENT_WILSON_Z,
         "raw_prediction_count": call_count,
+        "raw_correct_count": correct_count,
         "raw_accuracy": accuracy,
+        "raw_wilson_lower_bound": wilson,
     }
 
 
@@ -126,7 +213,6 @@ def _direction_quality_gates(backtest_by_horizon: dict) -> dict[str, dict]:
         continuation_gate = _direction_quality_gate(result, "continuation")
         reversal_gate = _direction_quality_gate(result, "reversal")
         signal_gates = _signal_quality_gates_for_horizon(result, continuation_gate, reversal_gate)
-        _apply_max_safe_coverage_to_signal_gates(result, signal_gates)
         disabled_signals = [
             gate_key
             for gate_key, gate in signal_gates.items()
@@ -142,14 +228,6 @@ def _direction_quality_gates(backtest_by_horizon: dict) -> dict[str, dict]:
             "signals": signal_gates,
         }
     return gates
-
-
-def _signal_gate_key(direction: str | None, signal_id: str | None) -> str:
-    return f"{direction or 'unknown'}:{signal_id or 'unknown'}"
-
-
-def _prediction_signal_id_from_backtest_row(row: dict) -> str:
-    return str(row.get("signal_model_id") or row.get("signal_tier") or "unknown")
 
 
 def _prediction_signal_id_from_horizon(horizon_decision: dict) -> str:
@@ -177,9 +255,11 @@ def _signal_quality_gates_for_horizon(
                 "signal_id": signal_id,
                 "prediction_count": 0,
                 "correct_count": 0,
+                "predictions": [],
             },
         )
         bucket["prediction_count"] += 1
+        bucket["predictions"].append(prediction)
         if prediction.get("is_correct"):
             bucket["correct_count"] += 1
 
@@ -187,64 +267,13 @@ def _signal_quality_gates_for_horizon(
     for key, bucket in grouped.items():
         direction = bucket["direction"]
         direction_gate = continuation_gate if direction == "continuation" else reversal_gate
-        min_accuracy = (
-            _DEPLOY_MIN_BACKTEST_CONTINUE_ACCURACY
-            if direction == "continuation"
-            else _DEPLOY_MIN_BACKTEST_REVERSE_ACCURACY
+        gates[key] = _signal_quality_gate_from_rows(
+            direction,
+            bucket["signal_id"],
+            bucket["predictions"],
+            direction_gate=direction_gate,
         )
-        prediction_count = int(bucket["prediction_count"])
-        correct_count = int(bucket["correct_count"])
-        accuracy = correct_count / prediction_count if prediction_count else None
-        failures: list[str] = []
-        inherited_direction_pass = bool(direction_gate.get("deployment_enabled"))
-
-        if prediction_count < _DEPLOY_MIN_SIGNAL_BACKTEST_CALLS and not inherited_direction_pass:
-            failures.append("insufficient_signal_sample")
-        if accuracy is None or _safe_num(accuracy, 0.0) < min_accuracy:
-            failures.append(f"weak_{direction}_signal_accuracy")
-        if inherited_direction_pass and prediction_count < _DEPLOY_MIN_SIGNAL_BACKTEST_CALLS:
-            failures = [failure for failure in failures if failure != "insufficient_signal_sample"]
-
-        gates[key] = {
-            "status": "quarantined" if failures else "passed",
-            "deployment_enabled": not failures,
-            "direction": direction,
-            "signal_id": bucket["signal_id"],
-            "failures": failures,
-            "min_prediction_count": _DEPLOY_MIN_SIGNAL_BACKTEST_CALLS,
-            "min_accuracy": min_accuracy,
-            "raw_prediction_count": prediction_count,
-            "raw_correct_count": correct_count,
-            "raw_accuracy": round(accuracy, 6) if accuracy is not None else None,
-            "direction_gate_status": direction_gate.get("status"),
-        }
     return gates
-
-
-def _prediction_group_key(prediction: dict) -> str:
-    return _signal_gate_key(
-        prediction.get("predicted_direction"),
-        _prediction_signal_id_from_backtest_row(prediction),
-    )
-
-
-def _prediction_book_metrics(predictions: list[dict]) -> dict:
-    prediction_count = len(predictions)
-    correct_count = sum(1 for item in predictions if item.get("is_correct"))
-    continuation = [item for item in predictions if item.get("predicted_direction") == "continuation"]
-    reversal = [item for item in predictions if item.get("predicted_direction") == "reversal"]
-    continuation_correct = sum(1 for item in continuation if item.get("is_correct"))
-    reversal_correct = sum(1 for item in reversal if item.get("is_correct"))
-    return {
-        "prediction_count": prediction_count,
-        "correct_count": correct_count,
-        "accuracy": correct_count / prediction_count if prediction_count else None,
-        "continuation_call_count": len(continuation),
-        "continuation_accuracy": continuation_correct / len(continuation) if continuation else None,
-        "reversal_call_count": len(reversal),
-        "reversal_accuracy": reversal_correct / len(reversal) if reversal else None,
-        **_return_metrics_for_predictions(predictions),
-    }
 
 
 def _prediction_book_passes_quality(metrics: dict) -> bool:
@@ -935,7 +964,39 @@ def _direction_gate_blocked_horizon(horizon_key: str, original: dict, gate: dict
     return blocked
 
 
-def _apply_direction_quality_gates_to_decision(decision: dict, gates: dict[str, dict]) -> dict:
+def _missing_signal_quality_gate(direction: str | None, signal_id: str | None, direction_gate: dict | None) -> dict:
+    min_accuracy = (
+        _DEPLOY_MIN_BACKTEST_CONTINUE_ACCURACY
+        if direction == "continuation"
+        else _DEPLOY_MIN_BACKTEST_REVERSE_ACCURACY
+    )
+    min_wilson = _signal_min_wilson(direction or "reversal")
+    return {
+        "status": "quarantined",
+        "deployment_enabled": False,
+        "direction": direction,
+        "signal_id": signal_id or "unknown",
+        "failures": ["missing_signal_backtest"],
+        "min_prediction_count": _DEPLOY_MIN_SIGNAL_BACKTEST_CALLS,
+        "min_accuracy": min_accuracy,
+        "min_wilson_lower_bound": min_wilson,
+        "wilson_z_value": _DEPLOYMENT_WILSON_Z,
+        "min_expected_return": _DEPLOY_MIN_SIGNAL_EXPECTED_RETURN,
+        "raw_prediction_count": 0,
+        "raw_correct_count": 0,
+        "raw_accuracy": None,
+        "raw_wilson_lower_bound": None,
+        "raw_expected_return": None,
+        "direction_gate_status": (direction_gate or {}).get("status"),
+    }
+
+
+def _apply_direction_quality_gates_to_decision(
+    decision: dict,
+    gates: dict[str, dict],
+    *,
+    signal_date: Any = None,
+) -> dict:
     if not decision:
         return decision
     horizons = decision.get("horizons", {})
@@ -944,13 +1005,30 @@ def _apply_direction_quality_gates_to_decision(decision: dict, gates: dict[str, 
             continue
         direction = horizon_decision.get("predicted_direction")
         horizon_gate = gates.get(horizon_key, {})
+        gate_container = horizon_gate.get("direction_quality_gate", horizon_gate)
         signal_key = _signal_gate_key(direction, _prediction_signal_id_from_horizon(horizon_decision))
-        signal_gate = (horizon_gate.get("signals") or {}).get(signal_key)
-        direction_gate = horizon_gate.get(direction) if direction in ("continuation", "reversal") else None
-        active_gate = signal_gate or direction_gate
+        signal_gate = (gate_container.get("signals") or {}).get(signal_key)
+        direction_gate = gate_container.get(direction) if direction in ("continuation", "reversal") else None
         if horizon_decision.get("status") != "prediction" or not isinstance(direction_gate, dict):
-            horizon_decision["deployment_quality_gate"] = deepcopy(horizon_gate) if horizon_gate else None
+            if horizon_decision.get("deployment_quality_gate") is None:
+                horizon_decision["deployment_quality_gate"] = deepcopy(gate_container) if gate_container else None
             continue
+        active_gate = signal_gate
+        raw_predictions = horizon_gate.get("_raw_predictions_for_gate") if isinstance(horizon_gate, dict) else None
+        if raw_predictions and signal_date is not None:
+            active_gate = _deployment_gate_for_horizon_decision(
+                decision,
+                horizon_key,
+                horizon_decision,
+                raw_predictions,
+                signal_date,
+            )
+        if active_gate is None:
+            active_gate = _missing_signal_quality_gate(
+                direction,
+                _prediction_signal_id_from_horizon(horizon_decision),
+                direction_gate,
+            )
         if not active_gate.get("deployment_enabled", False):
             horizons[horizon_key] = _direction_gate_blocked_horizon(horizon_key, horizon_decision, active_gate)
         else:
@@ -979,39 +1057,29 @@ def _finalize_deployment_quality(
     decisions_by_index: dict[int, dict],
 ) -> tuple[dict[int, dict], dict]:
     raw_backtest = run_decision_backtest(feature_df, decisions_by_index=decisions_by_index)
+    evidence_backtest = run_decision_backtest(
+        feature_df,
+        decisions_by_index=decisions_by_index,
+        lookback_days=_DEPLOYMENT_EVIDENCE_LOOKBACK_DAYS,
+    )
     direction_gates = _direction_quality_gates(raw_backtest)
 
-    gated_decisions = deepcopy(decisions_by_index)
-    for decision in gated_decisions.values():
-        _apply_direction_quality_gates_to_decision(decision, direction_gates)
-
-    baseline_backtest = run_decision_backtest(feature_df, decisions_by_index=gated_decisions)
-    repair_policies_by_horizon: dict[str, list[dict]] = {}
-    repair_counts_by_horizon: dict[str, int] = {}
-    for horizon in _HORIZONS:
-        horizon_key = f"{horizon}d"
-        baseline_result = baseline_backtest.get(horizon_key, {})
-        selected_rows = list(baseline_result.get("predictions", []))
-        repair_candidates = _coverage_repair_candidates(feature_df, gated_decisions, horizon)
-        selected_repair_candidates = _select_max_safe_coverage_candidates(selected_rows, repair_candidates)
-        repair_policies_by_horizon[horizon_key] = [
-            candidate["policy"]
-            for candidate in selected_repair_candidates
-        ]
-        repair_counts_by_horizon[horizon_key] = len(
-            {
-                _prediction_row_key(row)
-                for candidate in selected_repair_candidates
-                for row in candidate["rows"]
-            }
+    # Report the deployable walk-forward tape: each historical prediction is
+    # counted only when its signal family had already proven itself on prior
+    # completed outcomes before that signal date. The evidence window is longer
+    # than the report window, but every gate still filters by outcome_date <
+    # signal_date, so older rows can help and future rows cannot.
+    final_backtest = {
+        horizon_key: _deployment_backtest_from_raw(
+            result,
+            evidence_backtest.get(horizon_key, {}),
         )
-    _apply_coverage_repair_policies(feature_df, gated_decisions, repair_policies_by_horizon)
-
-    final_backtest = run_decision_backtest(feature_df, decisions_by_index=gated_decisions)
+        for horizon_key, result in raw_backtest.items()
+        if isinstance(result, dict)
+    }
     for horizon_key, result in final_backtest.items():
         raw_result = raw_backtest.get(horizon_key, {})
-        result["quality_gate"] = _deployment_quality_gate(result)
-        result["direction_quality_gate"] = deepcopy(direction_gates.get(horizon_key, {}))
+        evidence_result = evidence_backtest.get(horizon_key, {})
         result["raw_prediction_count"] = raw_result.get("prediction_count")
         result["raw_accuracy"] = raw_result.get("accuracy")
         result["raw_reverse_accuracy"] = raw_result.get("reversal_accuracy")
@@ -1022,14 +1090,25 @@ def _finalize_deployment_quality(
         result["raw_expected_atr_return"] = raw_result.get("expected_atr_return")
         result["raw_expected_atr_downside"] = raw_result.get("expected_atr_downside")
         result["raw_atr_reward_risk"] = raw_result.get("atr_reward_risk")
-        result["coverage_policy"] = raw_result.get("coverage_policy", _COVERAGE_POLICY_MAX_SAFE)
+        result["raw_coverage"] = raw_result.get("coverage")
+        result["quality_gate"] = _deployment_quality_gate(result)
+        result["direction_quality_gate"] = deepcopy(direction_gates.get(horizon_key, {}))
+        result["_raw_predictions_for_gate"] = deepcopy(evidence_result.get("predictions", []))
+        result["deployment_evidence_lookback_days"] = _DEPLOYMENT_EVIDENCE_LOOKBACK_DAYS
+        result["deployment_evidence_prediction_count"] = len(evidence_result.get("predictions", []))
+        result["deployment_evidence_period_start"] = evidence_result.get("period_start")
+        result["deployment_evidence_period_end"] = evidence_result.get("period_end")
+        result["raw_recent_predictions"] = deepcopy(raw_result.get("recent_predictions", []))
+        result["raw_backtest_policy"] = _RAW_BACKTEST_REPORTING_POLICY
+        result["coverage_policy"] = _BACKTEST_REPORTING_POLICY
+        result["backtest_policy"] = _BACKTEST_REPORTING_POLICY
         result["max_safe_prediction_count"] = result.get("prediction_count")
         result["max_safe_coverage"] = result.get("coverage")
-        result["coverage_expansion_signal_count"] = raw_result.get("coverage_expansion_signal_count", 0)
-        result["coverage_repair_policy_count"] = len(repair_policies_by_horizon.get(horizon_key, []))
-        result["coverage_repair_prediction_count"] = repair_counts_by_horizon.get(horizon_key, 0)
-        result["coverage_repair_policies"] = deepcopy(repair_policies_by_horizon.get(horizon_key, []))
-    return gated_decisions, final_backtest
+        result["coverage_expansion_signal_count"] = 0
+        result["coverage_repair_policy_count"] = 0
+        result["coverage_repair_prediction_count"] = 0
+        result["coverage_repair_policies"] = []
+    return decisions_by_index, final_backtest
 
 
 

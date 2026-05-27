@@ -826,7 +826,7 @@ def test_user_alert_payload_ready_cache_resyncs_entry_signals():
         "chart_data": [],
         "meta": {
             "full_decision_preloaded": True,
-            "context": _entry_context_meta("AAPL", price_data_end_date="2026-05-20"),
+            "context": _entry_context_meta("AAPL", price_data_end_date="2099-01-01"),
         },
     }
 

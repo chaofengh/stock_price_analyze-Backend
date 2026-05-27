@@ -828,7 +828,7 @@ def _actual_direction(
 
     tolerance = max(0.0, _safe_num(flat_tolerance, 0.0), _FLAT_PRICE_ABSOLUTE_TOLERANCE)
     price_delta = outcome_close - signal_close
-    if abs(price_delta) <= tolerance:
+    if abs(price_delta) < tolerance:
         return "flat"
 
     continuation_move = side_sign * price_delta
@@ -836,7 +836,10 @@ def _actual_direction(
 
 
 def _flat_tolerance_for_row(row: pd.Series) -> float:
-    return _FLAT_PRICE_ABSOLUTE_TOLERANCE
+    atr = _safe_num(row.get("ATR14"), np.nan)
+    if not np.isfinite(atr) or atr <= 0:
+        return _FLAT_PRICE_ABSOLUTE_TOLERANCE
+    return max(_FLAT_PRICE_ABSOLUTE_TOLERANCE, _DIRECTION_ATR_THRESHOLD * atr)
 
 
 def _prediction_is_correct(predicted_direction: str | None, actual_direction: str | None) -> bool:
@@ -844,7 +847,69 @@ def _prediction_is_correct(predicted_direction: str | None, actual_direction: st
         return False
     if actual_direction in ("continuation", "reversal"):
         return predicted_direction == actual_direction
-    return actual_direction == "flat" and predicted_direction == "reversal"
+    return False
+
+
+def _prediction_trade_sign(touched_side: str | None, predicted_direction: str | None) -> float:
+    side_sign = _side_sign(touched_side)
+    if abs(side_sign) <= _EPS or predicted_direction not in ("continuation", "reversal"):
+        return 0.0
+    return side_sign if predicted_direction == "continuation" else -side_sign
+
+
+def _direction_target_hit(
+    touched_side: str | None,
+    predicted_direction: str | None,
+    signal_close: float,
+    future_high: float,
+    future_low: float,
+    atr: float,
+) -> bool | None:
+    trade_sign = _prediction_trade_sign(touched_side, predicted_direction)
+    if (
+        abs(trade_sign) <= _EPS
+        or not np.isfinite(signal_close)
+        or not np.isfinite(future_high)
+        or not np.isfinite(future_low)
+        or not np.isfinite(atr)
+        or atr <= 0
+    ):
+        return None
+
+    target_move = _DIRECTION_ATR_THRESHOLD * atr
+    if trade_sign > 0:
+        return bool(future_high - signal_close >= target_move)
+    return bool(signal_close - future_low >= target_move)
+
+
+def _direction_target_hit_for_index(
+    feature_df: pd.DataFrame,
+    idx: int,
+    horizon: int,
+    predicted_direction: str | None,
+) -> bool | None:
+    if idx < 0 or idx + horizon >= len(feature_df):
+        return None
+    if "high" not in feature_df.columns or "low" not in feature_df.columns:
+        return None
+
+    row = feature_df.iloc[int(idx)]
+    future_rows = feature_df.iloc[int(idx) + 1 : int(idx) + int(horizon) + 1]
+    if future_rows.empty:
+        return None
+
+    signal_close = _safe_num(row.get("close"), np.nan)
+    atr = _safe_num(row.get("ATR14"), np.nan)
+    future_high = _safe_num(pd.to_numeric(future_rows["high"], errors="coerce").max(), np.nan)
+    future_low = _safe_num(pd.to_numeric(future_rows["low"], errors="coerce").min(), np.nan)
+    return _direction_target_hit(
+        row.get("touched_side"),
+        predicted_direction,
+        signal_close,
+        future_high,
+        future_low,
+        atr,
+    )
 
 
 def _continuation_hurdle_for_row(row: pd.Series) -> float:

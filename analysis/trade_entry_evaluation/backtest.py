@@ -177,15 +177,17 @@ def _run_horizon_backtest(
     *,
     horizon: int,
     decisions_by_index: dict[int, dict] | None = None,
+    lookback_days: int | None = _BACKTEST_LOOKBACK_DAYS,
 ) -> dict:
     if feature_df.empty:
         return _empty_backtest_result(feature_df, horizon)
 
     last_date = pd.Timestamp(feature_df.iloc[-1].get("date")).normalize()
-    period_start = max(
-        pd.Timestamp(feature_df.iloc[0].get("date")).normalize(),
-        last_date - pd.DateOffset(days=_BACKTEST_LOOKBACK_DAYS),
-    )
+    first_date = pd.Timestamp(feature_df.iloc[0].get("date")).normalize()
+    if lookback_days is None:
+        period_start = first_date
+    else:
+        period_start = max(first_date, last_date - pd.DateOffset(days=int(lookback_days)))
 
     eligible_touch_count = 0
     prediction_count = 0
@@ -251,7 +253,14 @@ def _run_horizon_backtest(
             continue
 
         predicted_direction = horizon_decision.get("predicted_direction")
-        is_correct = _prediction_is_correct(predicted_direction, actual_direction)
+        predicted_target_hit = _direction_target_hit_for_index(feature_df, idx, horizon, predicted_direction)
+        continuation_target_hit = _direction_target_hit_for_index(feature_df, idx, horizon, "continuation")
+        reversal_target_hit = _direction_target_hit_for_index(feature_df, idx, horizon, "reversal")
+        is_correct = (
+            bool(predicted_target_hit)
+            if predicted_target_hit is not None
+            else _prediction_is_correct(predicted_direction, actual_direction)
+        )
 
         prediction_count += 1
         if predicted_direction == "continuation":
@@ -266,9 +275,8 @@ def _run_horizon_backtest(
             missed_reversal_count += 1
         if is_correct:
             correct_count += 1
-        signal_tier = (horizon_decision.get("playbook") or {}).get("tier") or (
-            (horizon_decision.get("playbook") or {}).get("profile") or {}
-        ).get("tier")
+        playbook = horizon_decision.get("playbook") or {}
+        signal_tier = playbook.get("tier") or (playbook.get("profile") or {}).get("tier")
         if signal_tier:
             signal_tier_counts[str(signal_tier)] = signal_tier_counts.get(str(signal_tier), 0) + 1
 
@@ -291,14 +299,22 @@ def _run_horizon_backtest(
                 "outcome_close": round(outcome_close, 6),
                 "continuation_hurdle": round(continuation_hurdle, 6),
                 "flat_tolerance": round(flat_tolerance, 6),
+                "target_atr_multiple": _DIRECTION_ATR_THRESHOLD,
+                "predicted_target_hit": predicted_target_hit,
+                "continuation_target_hit": continuation_target_hit,
+                "reversal_target_hit": reversal_target_hit,
                 "is_correct": bool(is_correct),
                 **return_values,
                 "continuation_probability": horizon_decision.get("continuation_probability"),
                 "reversal_probability": horizon_decision.get("reversal_probability"),
                 "confidence_score": horizon_decision.get("confidence_score"),
-                "signal_model": (horizon_decision.get("playbook") or {}).get("name"),
-                "signal_model_id": (horizon_decision.get("playbook") or {}).get("id"),
-                "signal_precision": (horizon_decision.get("playbook") or {}).get("precision"),
+                "signal_model": playbook.get("name"),
+                "signal_model_id": playbook.get("id"),
+                "signal_precision": playbook.get("precision"),
+                "signal_match_count": playbook.get("match_count"),
+                "signal_correct_count": playbook.get("correct_count"),
+                "signal_wilson_lower_bound": playbook.get("wilson_lower_bound"),
+                "signal_recent_precision": playbook.get("recent_precision"),
                 "signal_tier": signal_tier,
             }
         )
@@ -347,6 +363,8 @@ def _run_horizon_backtest(
 def run_decision_backtest(
     feature_df: pd.DataFrame,
     decisions_by_index: dict[int, dict] | None = None,
+    *,
+    lookback_days: int | None = _BACKTEST_LOOKBACK_DAYS,
 ) -> dict:
     shared_decisions = decisions_by_index if decisions_by_index is not None else {}
     return {
@@ -354,6 +372,7 @@ def run_decision_backtest(
             feature_df,
             horizon=h,
             decisions_by_index=shared_decisions,
+            lookback_days=lookback_days,
         )
         for h in _HORIZONS
     }
