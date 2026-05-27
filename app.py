@@ -1,6 +1,7 @@
 # app.py
 import os
 import atexit
+import ipaddress
 import re
 from urllib.parse import urlparse
 
@@ -81,12 +82,13 @@ def _is_private_network_host(hostname: str | None) -> bool:
     if not hostname:
         return False
     host = hostname.lower()
-    if host in {"localhost", "127.0.0.1", "::1"}:
+    if host == "localhost" or host.endswith(".localhost"):
         return True
-    if host.startswith("192.168.") or host.startswith("10."):
-        return True
-    match = re.fullmatch(r"172\.(\d{1,2})\..+", host)
-    return bool(match and 16 <= int(match.group(1)) <= 31)
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private or address.is_link_local
 
 
 def _cors_origin_for_request(origin: str | None, allowed_origins) -> str | None:

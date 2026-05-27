@@ -59,6 +59,50 @@ def test_cors_preflight_accepts_configured_local_origins(monkeypatch):
     assert response.headers["Access-Control-Allow-Private-Network"] == "true"
 
 
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://app.localhost:3000",
+        "http://127.0.0.2:3000",
+        "http://[::1]:3000",
+    ],
+)
+def test_cors_preflight_accepts_loopback_frontend_origins(monkeypatch, origin):
+    monkeypatch.delenv("front_end_client_website", raising=False)
+    monkeypatch.delenv("FRONT_END_CLIENT_WEBSITE", raising=False)
+    app = create_app(testing=False)
+    with app.test_client() as local_client:
+        response = local_client.open(
+            "/api/world-markets?refresh=1",
+            method="OPTIONS",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert response.status_code == 204
+    assert response.headers["Access-Control-Allow-Origin"] == origin
+
+
+def test_cors_preflight_rejects_unconfigured_public_origins(monkeypatch):
+    monkeypatch.delenv("front_end_client_website", raising=False)
+    monkeypatch.delenv("FRONT_END_CLIENT_WEBSITE", raising=False)
+    app = create_app(testing=False)
+    with app.test_client() as local_client:
+        response = local_client.open(
+            "/api/world-markets?refresh=1",
+            method="OPTIONS",
+            headers={
+                "Origin": "https://frontend.example.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert response.status_code == 204
+    assert "Access-Control-Allow-Origin" not in response.headers
+
+
 def test_cors_headers_are_added_to_api_error_responses(monkeypatch):
     monkeypatch.delenv("front_end_client_website", raising=False)
     monkeypatch.delenv("FRONT_END_CLIENT_WEBSITE", raising=False)

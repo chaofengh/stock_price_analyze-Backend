@@ -681,13 +681,13 @@ def test_backtest_adds_expected_value_and_confidence_bucket_scoring():
     backtest = run_decision_backtest(df, decisions_by_index=decisions)
     five_day = backtest["5d"]
 
-    assert five_day["accuracy"] == 0.6
+    assert five_day["accuracy"] == 0.4
     assert five_day["win_rate"] == pytest.approx(0.8)
     assert five_day["expected_return"] == pytest.approx(0.046)
     assert five_day["expected_downside"] == pytest.approx(-0.04)
     assert five_day["expected_atr_return"] == pytest.approx(0.46)
     assert five_day["atr_reward_risk"] == pytest.approx(1.6875)
-    assert five_day["flat_count"] == 2
+    assert five_day["flat_count"] == 3
 
     by_date = {item["signal_date"]: item for item in five_day["predictions"]}
     assert by_date["2025-01-08"]["is_correct"] is False
@@ -697,7 +697,7 @@ def test_backtest_adds_expected_value_and_confidence_bucket_scoring():
 
     buckets = {item["bucket"]: item for item in five_day["confidence_buckets"]}
     assert buckets["60-69"]["prediction_count"] == 2
-    assert buckets["60-69"]["accuracy"] == 1.0
+    assert buckets["60-69"]["accuracy"] == 0.5
     assert buckets["60-69"]["win_rate"] == 1.0
     assert buckets["60-69"]["expected_return"] == pytest.approx(0.075)
     assert buckets["80-89"]["prediction_count"] == 2
@@ -797,7 +797,7 @@ def test_reversal_scoring_rejects_exact_flat_exit():
     assert backtest["5d"]["reversal_accuracy"] == 0.0
 
 
-def test_half_atr_move_in_predicted_direction_is_correct():
+def test_configured_atr_move_in_predicted_direction_is_correct():
     df = pd.DataFrame(
         {
             "date": pd.bdate_range("2025-01-02", periods=12),
@@ -807,9 +807,9 @@ def test_half_atr_move_in_predicted_direction_is_correct():
         }
     )
     df.loc[0, "touched_side"] = "Upper"
-    df.loc[5, "close"] = 101.0
+    df.loc[5, "close"] = 101.5
     df.loc[6, "touched_side"] = "Upper"
-    df.loc[11, "close"] = 99.0
+    df.loc[11, "close"] = 98.5
     decisions = {
         0: _manual_decision(
             _manual_horizon("prediction", "continuation", confidence=0.91),
@@ -831,12 +831,12 @@ def test_half_atr_move_in_predicted_direction_is_correct():
     assert predictions["2025-01-10"]["actual_direction"] == "reversal"
 
 
-def test_intrahorizon_half_atr_target_hit_counts_even_when_exit_close_is_flat():
+def test_intrahorizon_configured_atr_target_hit_counts_even_when_exit_close_is_flat():
     df = pd.DataFrame(
         {
             "date": pd.bdate_range("2025-01-02", periods=12),
             "close": [100.0] * 12,
-            "high": [100.0, 102.0, 105.0] + [100.0] * 9,
+            "high": [100.0, 102.0, 107.5] + [100.0] * 9,
             "low": [100.0] * 12,
             "ATR14": [10.0] * 12,
             "touched_side": ["Upper"] + [None] * 11,
@@ -854,7 +854,7 @@ def test_intrahorizon_half_atr_target_hit_counts_even_when_exit_close_is_flat():
 
     assert prediction["actual_direction"] == "flat"
     assert prediction["predicted_target_hit"] is True
-    assert prediction["target_atr_multiple"] == 0.5
+    assert prediction["target_atr_multiple"] == 0.65
     assert prediction["is_correct"] is True
     assert backtest["5d"]["correct_count"] == 1
 
